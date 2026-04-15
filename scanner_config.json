@@ -1,0 +1,22 @@
+{
+  "calibration": {
+    "card1_x_ratio": 0.4392,
+    "card1_y_ratio": 0.6294,
+    "card2_x_ratio": 0.486,
+    "card2_y_ratio": 0.6294,
+    "card_w_ratio": 0.0339,
+    "card_h_ratio": 0.0581,
+    "rank_area_ratio": [
+      0.0,
+      0.0,
+      1.0,
+      0.45
+    ]
+  },
+  "scan_delay_ms": 500,
+  "auto_confirm_threshold": 0.30,
+  "confirm_threshold": 0.15,
+  "window_title_match": "Mercury IX",
+  "calibration_version": 3,
+  "window_title_exact": "Mercury IX - Без лимит Холдем 5 000/10 000 Виртуални пари - Влязъл като nbglinkPoker"
+}

@@ -1,0 +1,14 @@
+# Core (always required)
+Pillow>=10.0.0
+
+# Scanner (optional but recommended for auto-detect)
+mss>=9.0.0
+pygetwindow>=0.0.9
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# OCR primary
+easyocr>=1.7.0
+
+# OCR fallback (also requires system Tesseract install)
+pytesseract>=0.3.10

@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Backups (manual rollback safety nets)
+*.bak
+*.bak_*
+
+# User-specific runtime data
+hand_log.jsonl
+logs/
+scanner_templates/
+
+# Debug / test artifacts
+test_*.png
+_ann.png
+debug_*.png
+*.tmp
+
+# Calibration is per-monitor — let users generate their own
+# (uncomment if you want to ship a default)
+# scanner_config.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Claude session data
+.claude/
+
+# Virtual envs
+venv/
+.venv/
+env/
+ENV/
