@@ -1,59 +1,60 @@
 # Pokadviser
 
-Real-time No-Limit Hold'em advisor за PokerStars.BG (Bella/Mercury IX клиент).
+Real-time No-Limit Hold'em advisor for PokerStars.BG (Bella/Mercury IX client).
 
-Чете PokerStars лог файла за board / position / street, скенира hole картите с OCR,
-и дава GTO-aligned съвети на всяка улица.
+Reads the PokerStars log file for board / position / street, scans hole cards
+with OCR, and provides GTO-aligned advice on every street.
 
-## Какво прави
+## Features
 
-- **Auto board / position / street detection** от PS лога (MSG_0080, MSG_0007, etc.)
-- **OCR скенер** за 2-те ръчни карти (EasyOCR + Tesseract fallback)
-- **Dealer button detection** чрез HoughCircles + red-center signature
-- **GTO-aligned strategy engine** базиран на Upswing Poker доктрина
-- **"ТИ ИМАШ / ТЕ БИЕ"** поленце с класификация на ръката + threats
+- **Auto board / position / street detection** from the PS log (MSG_0080,
+  MSG_0007, etc.)
+- **OCR scanner** for the 2 hole cards (EasyOCR primary + Tesseract fallback)
+- **Dealer button detection** via HoughCircles + red-center signature
+- **GTO-aligned strategy engine** based on Upswing Poker doctrine
+- **"YOU HAVE / YOU LOSE TO" panel** with hand classification + threats
 - **Multiway adjustment**, SPR buckets, board texture analysis
-- Поддръжка за 6-max cash и Zoom
+- Supports 6-max cash and Zoom
 
-## Файлове
+## Files
 
-| Файл | Роля |
+| File | Role |
 |---|---|
 | `poker_oop_tool.py` | Strategy engine (preflop + postflop, pure logic) |
 | `poker_live.py` | tkinter GUI + LogWatcher + scanner wiring |
-| `poker_scanner.py` | OCR скенер (EasyOCR + Tesseract) + button detector |
-| `poker_logger.py` | Standalone лог наблюдател (debug) |
-| `poker_strategy_log.py` | JSONL логер на advice + actions |
-| `scanner_config.json` | Калибрация + thresholds (auto-generated) |
+| `poker_scanner.py` | OCR scanner (EasyOCR + Tesseract) + button detector |
+| `poker_logger.py` | Standalone log watcher (debug) |
+| `poker_strategy_log.py` | JSONL logger for advice + actions |
+| `scanner_config.json` | Calibration + thresholds (auto-generated) |
 
-## Инсталация
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Optional за по-добро OCR:
+Optional for better OCR accuracy:
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki) (Windows installer)
 
-## Стартиране
+## Running
 
 ```bash
 python poker_live.py
 ```
 
-GUI ще се отвори. Първо натисни **"Калибрирай"** за да маркираш hole card region
-(2 клика върху прозореца на PokerStars). После може да включиш auto-scan.
+The GUI will open. First press **"Calibrate"** to mark the hole card region
+(2 clicks on the PokerStars window). Then you can enable auto-scan.
 
-## Архитектурни принципи
+## Architectural principles
 
-1. **Разделение**: `poker_oop_tool.py` е pure strategy (no UI, no I/O).
-   `poker_live.py` е само UI + wiring. `poker_scanner.py` е I/O + CV.
-2. **Лог → авто**: board, position, street, facing_bet, call_amount, bb_size,
-   pot, stack — всички се извличат от PokerStars лога.
-3. **Scanner → hole cards only**: само 2-те ръчни карти идват от screenshot.
-4. **Ratios, не пиксели**: scanner калибрацията е resolution-independent.
-5. **Graceful degradation**: ако EasyOCR/cv2/mss липсват, scanner е disabled
-   но advisor работи в manual mode.
+1. **Separation of concerns**: `poker_oop_tool.py` is pure strategy (no UI,
+   no I/O). `poker_live.py` is just UI + wiring. `poker_scanner.py` is I/O + CV.
+2. **Log → auto**: board, position, street, facing_bet, call_amount, bb_size,
+   pot, stack — all extracted from the PokerStars log.
+3. **Scanner → hole cards only**: only the 2 hole cards come from a screenshot.
+4. **Ratios, not pixels**: scanner calibration is resolution-independent.
+5. **Graceful degradation**: if EasyOCR / cv2 / mss are missing, the scanner
+   is disabled but the advisor still works in manual mode.
 
 ## Strategy engine highlights
 
@@ -61,19 +62,19 @@ GUI ще се отвори. Първо натисни **"Калибрирай"**
 - **3 Concepts**: Positional, Range, Nut advantage
 - **SPR buckets**: commit / standard / cautious / deep
 - **Made hand priority**: Quads > Full House > Flush > Straight > Set > Trips > 2pair > Pair
-- **Multiway downgrade**: TP = 1 улица, draws lose value, no bluff c-bets
+- **Multiway downgrade**: TP = 1 street, draws lose value, no bluff c-bets
 
-## Лимитации (out of scope)
+## Out of scope
 
-- Без четене на board от screenshots (идва от лог)
-- Без detection на действия/стакове от screenshots (от лог)
+- No board reading from screenshots (sourced from log)
+- No action / stack detection from screenshots (sourced from log)
 - Single-table only
-- Без мобилна версия
+- No mobile version
 
-## Документация
+## Documentation
 
-- `CLAUDE.md` — проектна памет (архитектура, conventions, debug tips)
-- `POKER_LEGENDA.txt` — стратегическа справка (Upswing Poker)
+- `CLAUDE.md` — project memory (architecture, conventions, debug tips)
+- `POKER_LEGENDA.txt` — strategy reference (Upswing Poker)
 
 ## License
 
