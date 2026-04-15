@@ -1029,6 +1029,19 @@ class CardScanner:
                 rejects.append({**base, "reason": f"dim_ring<160 ({brightness:.0f})"})
                 continue
 
+            # COLORED RING REJECTION — chip stacks (yellow 1K, red 5K) имат
+            # висока saturation в outer ring. Real D button има БЯЛ/cream
+            # пръстен → ниска saturation. Това отделя buttons от chips.
+            ring_s = hsv_full[..., 1][ring_mask > 0]
+            ring_sat_mean = float(ring_s.mean())
+            base["ring_sat"] = ring_sat_mean
+            if ring_sat_mean > 60:
+                rejects.append({
+                    **base,
+                    "reason": f"colored_ring_sat>{60} ({ring_sat_mean:.0f})",
+                })
+                continue
+
             # RED CENTER CHECK — D чипът в PS има червен PokerStars лого.
             inner_mask = np.zeros(gray.shape, dtype=np.uint8)
             cv2.circle(inner_mask, (cx, cy), max(1, int(r * 0.55)), 255, -1)
@@ -1053,6 +1066,7 @@ class CardScanner:
                 "x_ratio": float(cx) / W, "y_ratio": float(cy) / H,
                 "brightness": brightness,
                 "red_ratio": red_ratio,
+                "ring_sat": ring_sat_mean,
             })
 
         def _score(c_: Dict[str, Any]) -> float:
@@ -1178,8 +1192,8 @@ class CardScanner:
                 cs = sorted(cands, key=lambda c_: -c_.get("score", 0))
                 lines.append("PASSED CANDIDATES (sorted by score):")
                 lines.append(f"  {'#':>3} {'x%':>6} {'y%':>6} {'r':>4} "
-                             f"{'bright':>7} {'red%':>6} {'score':>6} "
-                             f"{'winner':>7}")
+                             f"{'bright':>7} {'red%':>6} {'sat':>5} "
+                             f"{'score':>6} {'winner':>7}")
                 for i, ca in enumerate(cs):
                     mark = "★" if (
                         result is not None
@@ -1192,6 +1206,7 @@ class CardScanner:
                         f"{ca['r']:>4d} "
                         f"{ca['brightness']:>7.1f} "
                         f"{ca['red_ratio']*100:>5.1f}% "
+                        f"{ca.get('ring_sat',0):>5.0f} "
                         f"{ca.get('score',0):>6.3f} "
                         f"{mark:>7}"
                     )
@@ -1199,12 +1214,13 @@ class CardScanner:
             if rejects:
                 lines.append("REJECTED CANDIDATES (top 20 by brightness):")
                 lines.append(f"  {'#':>3} {'x%':>6} {'y%':>6} {'r':>4} "
-                             f"{'bright':>7} {'red%':>6} reason")
+                             f"{'bright':>7} {'red%':>6} {'sat':>5} reason")
                 rs = sorted(rejects,
                             key=lambda r_: -r_.get("brightness", 0))[:20]
                 for i, rej in enumerate(rs):
                     b = rej.get("brightness", 0)
                     rr = rej.get("red_ratio", 0) * 100
+                    rs_val = rej.get("ring_sat", 0)
                     lines.append(
                         f"  {i:>3d} "
                         f"{rej['x_ratio']*100:>5.1f}% "
@@ -1212,6 +1228,7 @@ class CardScanner:
                         f"{rej['r']:>4d} "
                         f"{b:>7.1f} "
                         f"{rr:>5.1f}% "
+                        f"{rs_val:>5.0f} "
                         f"{rej['reason']}"
                     )
                 lines.append("")

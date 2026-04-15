@@ -1543,8 +1543,9 @@ class LiveAdvisor(tk.Tk):
                                      "(sorted by score) ===")
                         lines.append(
                             f"{'#':>2} {'x%':>6} {'y%':>6} {'r':>3} "
-                            f"{'bright':>7} {'red%':>6} {'score':>6} "
-                            f"{'→hero':>7} {'slot':>5} {'ang':>6} {'err':>5}"
+                            f"{'bright':>7} {'red%':>6} {'sat':>5} "
+                            f"{'score':>6} {'→hero':>7} {'slot':>5} "
+                            f"{'ang':>6} {'err':>5}"
                         )
                         for i, ca in enumerate(cands):
                             p2, s2, a2, e2 = position_from_dealer_ratio(
@@ -1558,6 +1559,7 @@ class LiveAdvisor(tk.Tk):
                                 f"{ca['r']:>3d} "
                                 f"{ca['brightness']:>7.1f} "
                                 f"{ca['red_ratio']*100:>5.1f}% "
+                                f"{ca.get('ring_sat',0):>5.0f} "
                                 f"{ca.get('score',0):>6.3f} "
                                 f"{p2:>6s}{mark} "
                                 f"{s2:>5d} "
