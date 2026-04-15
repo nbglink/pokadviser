@@ -63,33 +63,49 @@ RANKS = ['A','K','Q','J','T','9','8','7','6','5','4','3','2']
 SUITS = [('h','#e83030','\u2665'), ('d','#3080e0','\u2666'),
          ('c','#30b050','\u2663'), ('s','#333333','\u2660')]
 
+# Position maps (offset_from_btn → name). Strategy engine знае само 6 имена
+# (UTG/MP/CO/BTN/SB/BB), затова за 7-9 max по-големи групи се collapse-ват
+# към най-близката 6-max категория (UTG+1→UTG, LJ→MP, HJ→CO).
+POS_NAMES_9 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'UTG', 5:'MP', 6:'MP', 7:'CO', 8:'CO'}
+POS_NAMES_8 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'UTG', 5:'MP', 6:'MP', 7:'CO'}
+POS_NAMES_7 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'MP', 5:'MP', 6:'CO'}
 POS_NAMES_6 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'MP', 5:'CO'}
 POS_NAMES_5 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'CO'}
 POS_NAMES_4 = {0:'BTN', 1:'SB', 2:'BB', 3:'CO'}
 POS_NAMES_3 = {0:'BTN', 1:'SB', 2:'BB'}
 
-# Визуални ъгли на местата спрямо масата (hero = south = -90°).
-# Action върви по часовника (angle decreasing в ccw-позитивни координати):
-# hero → bot-left → top-left → top → top-right → bot-right → hero.
-# За N-max слотове: hero = slot 0, следващ clockwise = slot 1, и т.н.
-# Offset от BTN се изчислява като hero_offset = (n - slot_of_btn) % n.
-_SEAT_ANGLES_6 = {0: -90, 1: -150, 2: 150, 3: 90, 4: 30, 5: -30}
-_SEAT_ANGLES_5 = {0: -90, 1: -162, 2: 126, 3: 54, 4: -18}
-_SEAT_ANGLES_4 = {0: -90, 1: -180, 2: 90, 3: 0}
-_SEAT_ANGLES_3 = {0: -90, 1: 150, 2: 30}
+_POS_MAPS = {3: POS_NAMES_3, 4: POS_NAMES_4, 5: POS_NAMES_5, 6: POS_NAMES_6,
+             7: POS_NAMES_7, 8: POS_NAMES_8, 9: POS_NAMES_9}
+
+
+def _seat_angles(num_players):
+    """Генерира ъглите на N места около масата.
+
+    Hero = slot 0 = south (-90°). Слотовете вървят ПО ЧАСОВНИКА визуално
+    (= math angle DECREASING в нашата CCW-positive координатна система след
+    Y-flip-а). Slot 1 = seat до hero's right визуално (SW), slot n-1 = seat
+    до hero's left визуално (SE).
+
+    Action в покера тече clockwise, т.е. offset-ът от BTN (= (n - slot_BTN)%n)
+    съответно расте clockwise. BTN непосредствено CCW от hero → hero е SB.
+    """
+    step = 360.0 / num_players
+    angles = {}
+    for slot in range(num_players):
+        a = -90.0 - slot * step
+        while a > 180:
+            a -= 360
+        while a <= -180:
+            a += 360
+        angles[slot] = a
+    return angles
 
 
 def _btn_slot_from_angle(angle_deg, num_players):
     """Map ъгъл (в градуси, 0=изток, 90=север) → visual seat slot (0..n-1).
     Slot 0 = hero (south). Избира най-близкия angular slot."""
-    if num_players >= 6:
-        angles = _SEAT_ANGLES_6
-    elif num_players == 5:
-        angles = _SEAT_ANGLES_5
-    elif num_players == 4:
-        angles = _SEAT_ANGLES_4
-    else:
-        angles = _SEAT_ANGLES_3
+    n = max(3, min(9, int(num_players)))
+    angles = _seat_angles(n)
 
     def ang_diff(a, b):
         d = (a - b) % 360
@@ -142,15 +158,12 @@ def decode_log_card(s):
 
 
 def pos_name(offset_from_btn, num_players):
-    """Get position name from offset (0=BTN, 1=SB, ...) and player count."""
-    if num_players >= 6:
-        return POS_NAMES_6.get(offset_from_btn, '?')
-    elif num_players == 5:
-        return POS_NAMES_5.get(offset_from_btn, '?')
-    elif num_players == 4:
-        return POS_NAMES_4.get(offset_from_btn, '?')
-    else:
-        return POS_NAMES_3.get(offset_from_btn, '?')
+    """Get position name from offset (0=BTN, 1=SB, ...) and player count.
+
+    Supports 3-9 max tables. За 7-9 max крайните позиции се collapse-ват към
+    най-близката 6-max група, защото strategy engine знае само 6 имена."""
+    n = max(3, min(9, int(num_players)))
+    return _POS_MAPS[n].get(offset_from_btn % n, '?')
 
 
 class LogWatcher:
