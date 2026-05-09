@@ -2228,7 +2228,11 @@ class LiveAdvisor(tk.Tk):
         is_postflop_active = len(board) >= 3 and len(hole) == 2
         if len(hole) == 2:
             facing_raise = w.facing_raise_preflop or (w.street == 'preflop' and w.facing_bet and call_bb > 1.5)
-            pf = preflop_analyze(hole, hero_pos=pos, facing_raise=facing_raise)
+            stack_bb_pf = (w.hero_stack_chips / w.bb_size
+                           if w.bb_size > 0 and w.hero_stack_chips > 0
+                           else None)
+            pf = preflop_analyze(hole, hero_pos=pos, facing_raise=facing_raise,
+                                 stack_bb=stack_bb_pf)
             num_opp_est = max(
                 1, (len(w.occupied_seats) - len(w.folded_seats)) - 1,
             )
@@ -2327,7 +2331,8 @@ class LiveAdvisor(tk.Tk):
                 num_opp = max(1, (len(w.occupied_seats) - len(w.folded_seats)) - 1)
 
                 r = postflop_analyze(hole, board, facing_bet=facing, hero_pos=pos, villain_pos=vp,
-                                     stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp)
+                                     stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp,
+                                     call_bb=(call_bb if facing else None))
                 post_warnings = self._context_warnings(
                     position_source=getattr(w, "position_source", None),
                     hero_pos=pos,
@@ -2387,6 +2392,12 @@ class LiveAdvisor(tk.Tk):
                 if facing and call_bb > 0 and pot_bb and pot_bb > 0:
                     needed = call_bb / (pot_bb + call_bb)
                     strip_parts.append(f"need {needed * 100:.0f}% eq")
+                    # MDF на river facing bet — колко от range-а трябва да
+                    # защити hero за да не е exploitable към bluffs.
+                    if w.street == 'river':
+                        bet_pct_pot = call_bb / pot_bb
+                        mdf_pct = int(round(100 / (1 + bet_pct_pot)))
+                        strip_parts.append(f"MDF {mdf_pct}%")
                 if beat_pct is not None:
                     strip_parts.append(f"ТИ ~{beat_pct}%")
                 self.decision_strip_var.set(" · ".join(strip_parts))
