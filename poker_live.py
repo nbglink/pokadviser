@@ -805,21 +805,28 @@ class LiveAdvisor(tk.Tk):
         self.decision_strip_var = tk.StringVar(value="")
         tk.Label(res, textvariable=self.decision_strip_var, bg=self.BG2,
                  fg="#aaccdd", font=("Consolas", 10), pady=1).pack()
-        # ── "ТИ ИМАШ / ТЕ БИЕ" поленце ──
-        self.threats_frame = tk.Frame(res, bg="#1a1a22", bd=1, relief="solid")
+        # ── "ТИ ИМАШ / ТЕ БИЕ" — info row с тънка цветна ивица отляво ──
+        # Без full-color background (visual hierarchy: action banner трябва
+        # да остане dominant). Стрипата отляво кодира semantic band-а с
+        # приглушени цветове, за да не "вади очи" от главния action.
+        self.threats_frame = tk.Frame(res, bg=self.BG2)
         self.threats_frame.pack(fill="x", padx=20, pady=4)
+        self.threats_stripe = tk.Frame(self.threats_frame, bg="#3a3a44", width=4)
+        self.threats_stripe.pack(side="left", fill="y")
+        self.threats_inner = tk.Frame(self.threats_frame, bg=self.BG2)
+        self.threats_inner.pack(side="left", fill="both", expand=True)
         self.threats_have_var = tk.StringVar(value="")
         self.threats_have_lbl = tk.Label(
-            self.threats_frame, textvariable=self.threats_have_var,
-            bg="#1a1a22", fg="#88ddff",
-            font=("Segoe UI", 10, "bold"), anchor="w", padx=8, pady=2,
+            self.threats_inner, textvariable=self.threats_have_var,
+            bg=self.BG2, fg="#9bbacc",
+            font=("Segoe UI", 10), anchor="w", padx=10, pady=1,
             wraplength=600, justify="left")
         self.threats_have_lbl.pack(fill="x")
         self.threats_beat_var = tk.StringVar(value="")
         self.threats_beat_lbl = tk.Label(
-            self.threats_frame, textvariable=self.threats_beat_var,
-            bg="#1a1a22", fg="#ff9988",
-            font=("Segoe UI", 10), anchor="w", padx=8, pady=2,
+            self.threats_inner, textvariable=self.threats_beat_var,
+            bg=self.BG2, fg="#bb9090",
+            font=("Segoe UI", 10), anchor="w", padx=10, pady=1,
             wraplength=600, justify="left")
         self.threats_beat_lbl.pack(fill="x")
         self.post_reason_var = tk.StringVar(value="")
@@ -865,17 +872,15 @@ class LiveAdvisor(tk.Tk):
         if new_band == current:
             return
         self._last_color_band = new_band
-        if new_band is None:
-            frame_bg, have_fg, beat_fg = "#1a1a22", "#88ddff", "#ff9988"
-        elif new_band == "green":
-            frame_bg, have_fg, beat_fg = "#1a2a1a", "#88ff88", "#aaccaa"
-        elif new_band == "amber":
-            frame_bg, have_fg, beat_fg = "#2a261a", "#ffd866", "#ffaa66"
-        else:  # red
-            frame_bg, have_fg, beat_fg = "#2a1a1a", "#ffaaaa", "#ff7766"
-        self.threats_frame.config(bg=frame_bg)
-        self.threats_have_lbl.config(bg=frame_bg, fg=have_fg)
-        self.threats_beat_lbl.config(bg=frame_bg, fg=beat_fg)
+        # Само цветната ивица се сменя — текстът остава в неутрални тонове,
+        # за да не "вади очи" и да остави фокуса на action banner-а.
+        stripe_bg = {
+            None: "#3a3a44",      # dim grey-purple — neutral idle
+            "green": "#3d8a52",   # muted green
+            "amber": "#a08040",   # muted amber
+            "red": "#9a4a4a",     # muted red
+        }[new_band]
+        self.threats_stripe.config(bg=stripe_bg)
 
     # ── Card Picker ───────────────────────────────────────────────────────────
     def _pick_rank(self, rank):
