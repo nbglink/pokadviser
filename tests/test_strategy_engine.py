@@ -371,6 +371,88 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertNotIn("ICM", r["reason"])
         self.assertEqual(r["icm_pressure"], 0.0)
 
+    # ── Tier 4: polarized sizing, probe bets, antes, villain type ──
+
+    def test_polarized_river_strong_hand_overbet(self):
+        # Set on river → polarized range (nuts + bluffs) → overbet
+        r = strategy.postflop_analyze(
+            [("7", "c"), ("7", "d")],
+            [("7", "s"), ("A", "c"), ("K", "d"), ("2", "h"), ("3", "c")],
+            facing_bet=False, hero_pos="CO", villain_pos="BTN",
+            stack_bb=80, pot_bb=20,
+        )
+        sizing = r["sizing"].lower()
+        self.assertTrue(
+            "polarized" in sizing or "overbet" in sizing or "75-100" in sizing
+            or "100-125" in sizing,
+            r["sizing"],
+        )
+
+    def test_linear_river_tp_smaller_sizing(self):
+        # Top pair on river → merged value → smaller sizing
+        r = strategy.postflop_analyze(
+            [("A", "c"), ("Q", "d")],
+            [("A", "s"), ("7", "c"), ("K", "d"), ("2", "h"), ("3", "c")],
+            facing_bet=False, hero_pos="CO", villain_pos="BTN",
+            stack_bb=80, pot_bb=20,
+        )
+        # Should be smaller — 33-50% range
+        self.assertTrue(
+            "33-50" in r["sizing"] or "linear" in r["sizing"].lower(),
+            r["sizing"],
+        )
+
+    def test_villain_type_lag_narrows_less(self):
+        btn = strategy.OPEN_RANGES["BTN"]
+        n_lag = strategy.narrow_range_facing_bet(btn, "turn", villain_type="lag")
+        n_tag = strategy.narrow_range_facing_bet(btn, "turn", villain_type="tag")
+        n_nit = strategy.narrow_range_facing_bet(btn, "turn", villain_type="nit")
+        # LAG bets wider → narrowed range stays wider (more hands)
+        self.assertGreater(len(n_lag), len(n_tag))
+        # NIT bets only nuts → narrowed range is tighter
+        self.assertLess(len(n_nit), len(n_tag))
+
+    def test_probe_bet_detected_on_oop_after_check_thru(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("Q", "c"), ("7", "d"), ("2", "h"), ("5", "c")],
+            facing_bet=False, hero_pos="BB", villain_pos="BTN",
+            stack_bb=80, pot_bb=10, num_opponents=1,
+            prev_street_checked_thru=True,
+        )
+        self.assertTrue(r["is_probe_spot"])
+        self.assertIn("probe", r["reason"].lower())
+
+    def test_probe_bet_not_when_in_position(self):
+        # IP cannot probe — probe is OOP-specific
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("Q", "c"), ("7", "d"), ("2", "h"), ("5", "c")],
+            facing_bet=False, hero_pos="BTN", villain_pos="BB",
+            stack_bb=80, pot_bb=10, num_opponents=1,
+            prev_street_checked_thru=True,
+        )
+        # Engine treats hero as IP because BTN > BB → not probe
+        self.assertFalse(r["is_probe_spot"])
+
+    def test_villain_type_returned_in_dict(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h")],
+            facing_bet=False, hero_pos="CO",
+            villain_type="lag",
+        )
+        self.assertEqual(r["villain_type"], "lag")
+
+    def test_ante_bb_passes_through(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h")],
+            facing_bet=False, hero_pos="CO",
+            ante_bb=0.125,
+        )
+        self.assertEqual(r["ante_bb"], 0.125)
+
 
 if __name__ == "__main__":
     unittest.main()

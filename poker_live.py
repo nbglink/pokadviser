@@ -560,11 +560,16 @@ class LogWatcher:
             elif self.call_amount > self._preflop_base_call:
                 self.facing_raise_preflop = True
 
-        # Pot accumulator: initialize with blinds at first opportunity,
-        # add villain-commit delta when call_amount grows.
+        # Pot accumulator: initialize with blinds (+ antes if configured)
+        # at first opportunity. Add villain-commit delta when call_amount
+        # grows.
         if self.bb_size > 0 and self.pot_chips == 0:
             # SB+BB baseline (assumes SB = BB/2, common in PS cash + tourneys)
-            self.pot_chips = self.bb_size + self.bb_size // 2
+            ante_chips = int(getattr(self, 'ante_bb_setting', 0.0) * self.bb_size)
+            num_active = max(2, self._view_num_players or 6)
+            self.pot_chips = (
+                self.bb_size + self.bb_size // 2 + ante_chips * num_active
+            )
         if self.facing_bet and self.call_amount > self._prev_call_amount:
             # Поне един villain е сложил (call_amount - prev) тази улица.
             # Под-counting за multiway, но никога не е по-малко точно от 0.
@@ -659,6 +664,11 @@ class LiveAdvisor(tk.Tk):
         self._hole_confidence = None
         self._compact_mode = False
         self._icm_pressure = 0.0  # 0=off, 0.5=mild, 0.7=heavy
+        self._villain_type = 'tag'  # 'lag' / 'tag' / 'nit' / 'whale'
+        self._ante_bb = 0.0  # ante size в BB; 0 = no antes
+        # Track previous-street action for probe-bet detection
+        self._prev_street_pot_chips = 0
+        self._prev_street_name = None
         if _LOG:
             _LOG.info("[INIT] LiveAdvisor started; scanner=%s",
                       "OK" if self.scanner and self.scanner.available
@@ -690,6 +700,14 @@ class LiveAdvisor(tk.Tk):
             command=self._cycle_icm,
         )
         self.icm_btn.pack(side="right", padx=(4, 4))
+        # Villain type toggle — TAG / LAG / NIT / Whale
+        self.villain_btn = tk.Button(
+            hdr, text="vs: TAG", font=("Segoe UI", 9, "bold"),
+            bg="#283332", fg="#aaccdd", activebackground="#3a4a4a",
+            relief="flat", bd=0, padx=10, pady=3,
+            command=self._cycle_villain,
+        )
+        self.villain_btn.pack(side="right", padx=(4, 4))
         self.status_var = tk.StringVar(value="Waiting for hand...")
         tk.Label(hdr, textvariable=self.status_var, bg=self.BG2, fg="#88aa88",
                  font=("Segoe UI", 11)).pack(side="right", padx=8)
@@ -998,6 +1016,20 @@ class LiveAdvisor(tk.Tk):
         else:
             self._icm_pressure = 0.0
             self.icm_btn.config(text="ICM: off", bg="#332828", fg="#cccccc")
+
+    def _cycle_villain(self):
+        """Cycle villain type: TAG → LAG → NIT → Whale → TAG."""
+        order = ['tag', 'lag', 'nit', 'whale']
+        idx = order.index(self._villain_type) if self._villain_type in order else 0
+        self._villain_type = order[(idx + 1) % len(order)]
+        labels = {
+            'tag': ("vs: TAG", "#283332", "#aaccdd"),
+            'lag': ("vs: LAG", "#3a2a3a", "#ffaaee"),
+            'nit': ("vs: NIT", "#28323a", "#88ccff"),
+            'whale': ("vs: Whale", "#3a3a28", "#ffee88"),
+        }
+        text, bg, fg = labels[self._villain_type]
+        self.villain_btn.config(text=text, bg=bg, fg=fg)
 
     def _set_focus_panel(self, meta, action, detail, color="#f0d060"):
         self.focus_meta_var.set(meta or "")
@@ -2357,11 +2389,26 @@ class LiveAdvisor(tk.Tk):
                 # Multiway: alive - 1 = opponents (минус hero)
                 num_opp = max(1, (len(w.occupied_seats) - len(w.folded_seats)) - 1)
 
+                # Probe spot detection: previous street finished without
+                # pot growth → check-through. Compare current pot to
+                # snapshot taken when this street started.
+                prev_checked = False
+                if self._prev_street_name and self._prev_street_name != w.street:
+                    # Street changed since last poll; current pot delta
+                    # tells us if last street had aggression.
+                    delta = (w.pot_chips or 0) - (self._prev_street_pot_chips or 0)
+                    prev_checked = (delta == 0 and self._prev_street_pot_chips > 0)
+                self._prev_street_pot_chips = w.pot_chips or 0
+                self._prev_street_name = w.street
+
                 r = postflop_analyze(hole, board, facing_bet=facing, hero_pos=pos, villain_pos=vp,
                                      stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp,
                                      call_bb=(call_bb if facing else None),
                                      is_3bet_pot=bool(getattr(w, 'facing_raise_preflop', False)),
-                                     icm_pressure=self._icm_pressure)
+                                     icm_pressure=self._icm_pressure,
+                                     prev_street_checked_thru=prev_checked,
+                                     villain_type=self._villain_type,
+                                     ante_bb=self._ante_bb)
                 post_warnings = self._context_warnings(
                     position_source=getattr(w, "position_source", None),
                     hero_pos=pos,
