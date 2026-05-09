@@ -1241,11 +1241,21 @@ class CardScanner:
                 rejects.append({**base, "reason": "empty_ring"})
                 continue
             brightness = float(ring_pixels.mean())
+            ring_std = float(ring_pixels.std())
             base["brightness"] = brightness
+            base["ring_std"] = ring_std
             # Пръстенът на D чипа е бял/кремав → brightness > 160
             # (свалено от 170 — реални бутони на тъмни теми падат до 165-170)
             if brightness < 160:
                 rejects.append({**base, "reason": f"dim_ring<160 ({brightness:.0f})"})
+                continue
+            # Ring uniformity — D button ring е uniform бял/кремав, std~10-20.
+            # Chip stacks имат stripes / inset rings → std скача 35-60+.
+            if ring_std > 30:
+                rejects.append({
+                    **base,
+                    "reason": f"ring_textured>30 (std={ring_std:.0f})",
+                })
                 continue
 
             # COLORED RING REJECTION — chip stacks (yellow 1K, red 5K) имат
@@ -1280,18 +1290,49 @@ class CardScanner:
                 rejects.append({**base, "reason": f"no_red<3% ({red_ratio*100:.1f}%)"})
                 continue
 
+            # CONTRAST CHECK — D button: бял ring (V≥200) + тъмен/colored
+            # center (PS лого = colored на dark background). Δ = ring V −
+            # inner V трябва да е ≥ 25. Chip stacks имат similar V в ring
+            # и center → Δ малък или отрицателен.
+            inner_v_mean = float(inner_v.mean())
+            ring_v_mean = float(hsv_full[..., 2][ring_mask > 0].mean())
+            v_contrast = ring_v_mean - inner_v_mean
+            base["v_contrast"] = v_contrast
+            if v_contrast < 25:
+                rejects.append({
+                    **base,
+                    "reason": f"low_contrast<25 (Δv={v_contrast:.0f})",
+                })
+                continue
+
             cands.append({
                 "cx": int(cx), "cy": int(cy), "r": int(r),
                 "x_ratio": float(cx) / W, "y_ratio": float(cy) / H,
                 "brightness": brightness,
                 "red_ratio": red_ratio,
                 "ring_sat": ring_sat_mean,
+                "ring_std": ring_std,
+                "v_contrast": v_contrast,
             })
+
+        # Sticky tracker — ако в предишния call открихме бутон с висока
+        # confidence, кандидат на ≤ ~8% от прозорец-разстояние от тогавашната
+        # позиция получава score boost. Намалява flicker между близки
+        # false positives когато scene-та е стабилна.
+        last_btn = getattr(self, "_last_button_state", None)
+        sticky_thresh = float(min(W, H) * 0.08)
 
         def _score(c_: Dict[str, Any]) -> float:
             b_norm = min(1.0, max(0.0, (c_["brightness"] - 160) / 95.0))
             r_norm = min(1.0, c_["red_ratio"] / 0.15)  # 15% red → full score
-            return 0.4 * b_norm + 0.6 * r_norm
+            base_score = 0.4 * b_norm + 0.6 * r_norm
+            if last_btn is not None:
+                dx = c_["cx"] - last_btn["cx"]
+                dy = c_["cy"] - last_btn["cy"]
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist <= sticky_thresh and last_btn["conf"] >= 0.4:
+                    base_score += 0.15  # boost за стабилност
+            return min(1.0, base_score)
 
         # Добави score към всички кандидати (за debug sorting)
         for c_ in cands:
@@ -1310,6 +1351,27 @@ class CardScanner:
 
         best = max(cands, key=lambda c_: c_["score"])
         conf = best["score"]
+
+        # Confidence floor — отказваме несигурна detection вместо да дадем
+        # грешна позиция. По-добре да върнем None и UI-ят да остане в
+        # неопределено състояние, отколкото да стане position-flip.
+        if conf < 0.30:
+            if debug_dir is not None:
+                self._save_dealer_debug(
+                    full, circles.tolist(), None, debug_dir,
+                    cands=cands, rejects=rejects + [{
+                        **best, "reason": f"low_score<0.30 ({conf:.2f})"
+                    }],
+                    window_size=(W, H),
+                    r_range=(r_min, r_max),
+                    card_exclude=card_exclude,
+                )
+            return None
+
+        # Update sticky tracker за следващия poll
+        self._last_button_state = {
+            "cx": best["cx"], "cy": best["cy"], "conf": conf,
+        }
 
         result = {
             "x_ratio": best["cx"] / W,
@@ -1411,8 +1473,8 @@ class CardScanner:
                 cs = sorted(cands, key=lambda c_: -c_.get("score", 0))
                 lines.append("PASSED CANDIDATES (sorted by score):")
                 lines.append(f"  {'#':>3} {'x%':>6} {'y%':>6} {'r':>4} "
-                             f"{'bright':>7} {'red%':>6} {'sat':>5} "
-                             f"{'score':>6} {'winner':>7}")
+                             f"{'bright':>7} {'r_std':>6} {'red%':>6} "
+                             f"{'sat':>5} {'Δv':>5} {'score':>6} {'winner':>7}")
                 for i, ca in enumerate(cs):
                     mark = "★" if (
                         result is not None
@@ -1424,8 +1486,10 @@ class CardScanner:
                         f"{ca['y_ratio']*100:>5.1f}% "
                         f"{ca['r']:>4d} "
                         f"{ca['brightness']:>7.1f} "
+                        f"{ca.get('ring_std',0):>6.1f} "
                         f"{ca['red_ratio']*100:>5.1f}% "
                         f"{ca.get('ring_sat',0):>5.0f} "
+                        f"{ca.get('v_contrast',0):>5.0f} "
                         f"{ca.get('score',0):>6.3f} "
                         f"{mark:>7}"
                     )
