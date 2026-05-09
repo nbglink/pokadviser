@@ -1415,6 +1415,22 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     if is_multiway:
         mw_note = f"Multiway ({num_opponents} опонента): TP = 1 улица, draws downgrade, без bluff c-bet."
 
+    # Flush-threat detection: 3+ от една боя на board И hero има 0 от тая боя.
+    # Ако сме само pair/two_pair (не flush, не set+) — не комит-ваме срещу
+    # натиск, защото villain често вече има made flush.
+    from collections import Counter as _Counter
+    _board_suits = _Counter(c[1] for c in board)
+    _top_suit, _top_suit_count = (_board_suits.most_common(1)[0]
+                                  if _board_suits else ('', 0))
+    _hero_top_suit_n = sum(1 for c in hole if c[1] == _top_suit)
+    flush_threat = (_top_suit_count >= 3 and _hero_top_suit_n == 0
+                    and hero_class in ('high_card', 'pair', 'two_pair',
+                                       'trips'))
+    ft_note = ""
+    if flush_threat:
+        ft_note = (f"Flush заплаха: {_top_suit_count}{_top_suit} на борда, "
+                   f"ти имаш 0. Не committ-вай pair/2pair срещу натиск.")
+
     # Made hand detection (works on all streets)
     has_made_flush = made_flush(hole, board)
     has_made_straight = made_straight(hole, board)
@@ -1473,6 +1489,7 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     pn = f"  [{pa['note']}]" if pa.get('note') else ""
     sn = f"  [{spr_note}]" if spr_note else ""
     mn = f"  [{mw_note}]" if mw_note else ""
+    ftn = f"  [{ft_note}]" if ft_note else ""
 
     def _mw_adjust(action, color, hand_label):
         """При multiway смъкваме агресията за не-монстри:
@@ -1489,10 +1506,28 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             return "CHECK (multiway)", "#f0d060"
         return action, color
 
+    def _flush_threat_adjust(action, color, hand_label):
+        """3+ от една боя на board И hero без тая боя: pair/2pair НЕ
+        committ-ват срещу натиск. RAISE→CALL малък/FOLD, BET→CHECK
+        (free showdown). Силни ръце (FLUSH/STRAIGHT/Сет/Две двойки)
+        запазват агресията — те често крушат бoard-а."""
+        if not flush_threat:
+            return action, color
+        strong_labels = ('FLUSH', 'STRAIGHT', 'Сет', 'Две двойки', 'QUADS', 'Boat')
+        if any(s in hand_label for s in strong_labels):
+            return action, color
+        a_upper = action.upper()
+        if 'RAISE' in a_upper and 'CALL' not in a_upper:
+            return "CALL малък / FOLD голям (flush заплаха)", "#ffb040"
+        if a_upper.startswith('BET') and 'CHECK' not in a_upper:
+            return "CHECK (flush заплаха)", "#ffb040"
+        return action, color
+
     def R(a, c, h, r):
         a2, c2 = _mw_adjust(a, c, h)
+        a3, c3 = _flush_threat_adjust(a2, c2, h)
         return dict(
-            action=a2, color=c2, hand=h, reason=r + pn + sn + mn,
+            action=a3, color=c3, hand=h, reason=r + pn + sn + mn + ftn,
             sizing=sizing,
             hero_class=hero_class,
             hero_label=hero_label,
