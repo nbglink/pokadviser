@@ -636,12 +636,14 @@ class LiveAdvisor(tk.Tk):
         self._last_scan_card_images = None
         self._hole_source = None
         self._hole_confidence = None
+        self._compact_mode = False
         if _LOG:
             _LOG.info("[INIT] LiveAdvisor started; scanner=%s",
                       "OK" if self.scanner and self.scanner.available
                       else "unavailable")
 
         self._build()
+        self._bind_shortcuts()
         self._poll()
 
     def _build(self):
@@ -650,19 +652,26 @@ class LiveAdvisor(tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text="\u2660 POKER ADVISOR", bg=self.BG2, fg=self.GOLD,
                  font=("Segoe UI", 18, "bold")).pack(side="left", padx=12)
+        self.compact_btn = tk.Button(
+            hdr, text="COMPACT", font=("Segoe UI", 9, "bold"),
+            bg="#243328", fg="#d8e8d8", activebackground="#334a3a",
+            relief="flat", bd=0, padx=10, pady=3,
+            command=self._toggle_compact,
+        )
+        self.compact_btn.pack(side="right", padx=(4, 12))
         self.status_var = tk.StringVar(value="Waiting for hand...")
         tk.Label(hdr, textvariable=self.status_var, bg=self.BG2, fg="#88aa88",
-                 font=("Segoe UI", 11)).pack(side="right", padx=12)
+                 font=("Segoe UI", 11)).pack(side="right", padx=8)
 
         # Scanner row (auto-scan toggle + calibrate + training counter)
-        sbar = tk.Frame(self, bg=self.BG2, pady=4)
-        sbar.pack(fill="x")
+        self.sbar = tk.Frame(self, bg=self.BG2, pady=4)
+        self.sbar.pack(fill="x")
         scanner_ok = self.scanner is not None and self.scanner.available
         self.auto_scan_var = tk.BooleanVar(value=False)
         cb_state = "normal" if scanner_ok else "disabled"
         tip = "" if scanner_ok else f" (missing: {self.scanner_err or 'scanner'})"
         self.auto_scan_cb = tk.Checkbutton(
-            sbar, text="\U0001F50D Auto-scan" + tip, variable=self.auto_scan_var,
+            self.sbar, text="Auto-scan" + tip, variable=self.auto_scan_var,
             bg=self.BG2, fg="#cccccc", activebackground=self.BG2,
             selectcolor="#2a3a2a", font=("Segoe UI", 10, "bold"), state=cb_state,
             command=self._on_toggle_autoscan,
@@ -670,7 +679,7 @@ class LiveAdvisor(tk.Tk):
         self.auto_scan_cb.pack(side="left", padx=12)
 
         self.calib_btn = tk.Button(
-            sbar, text="Калибрирай", font=("Segoe UI", 9, "bold"),
+            self.sbar, text="Calibrate", font=("Segoe UI", 9, "bold"),
             bg="#2a3a4a", fg="white", activebackground="#3a5a7a",
             relief="flat", bd=0, padx=8, pady=2,
             command=self._calibrate_dialog, state=cb_state,
@@ -678,7 +687,7 @@ class LiveAdvisor(tk.Tk):
         self.calib_btn.pack(side="left", padx=4)
 
         self.scan_now_btn = tk.Button(
-            sbar, text="Scan now", font=("Segoe UI", 9, "bold"),
+            self.sbar, text="Scan now", font=("Segoe UI", 9, "bold"),
             bg="#2a5a3a", fg="white", activebackground="#3a7a4a",
             relief="flat", bd=0, padx=8, pady=2,
             command=self._manual_scan, state=cb_state,
@@ -686,16 +695,16 @@ class LiveAdvisor(tk.Tk):
         self.scan_now_btn.pack(side="left", padx=2)
 
         self.debug_btn = tk.Button(
-            sbar, text="\U0001F41B", font=("Segoe UI", 9, "bold"),
+            self.sbar, text="Debug", font=("Segoe UI", 9, "bold"),
             bg="#5a4a2a", fg="white", activebackground="#7a6a3a",
-            relief="flat", bd=0, padx=6, pady=2,
+            relief="flat", bd=0, padx=8, pady=2,
             command=self._debug_scan, state=cb_state,
         )
         self.debug_btn.pack(side="left", padx=2)
 
         # BTN scan: опитва да детектира D чипа → hero position
         self.btn_scan_btn = tk.Button(
-            sbar, text="D?", font=("Segoe UI", 9, "bold"),
+            self.sbar, text="D?", font=("Segoe UI", 9, "bold"),
             bg="#2a3a5a", fg="white", activebackground="#3a4a7a",
             relief="flat", bd=0, padx=6, pady=2,
             command=self._scan_dealer_button, state=cb_state,
@@ -704,12 +713,12 @@ class LiveAdvisor(tk.Tk):
 
         # OCR status (read-only label: напр. "EasyOCR GPU ✓")
         self.ocr_status_var = tk.StringVar(value="")
-        tk.Label(sbar, textvariable=self.ocr_status_var, bg=self.BG2,
+        tk.Label(self.sbar, textvariable=self.ocr_status_var, bg=self.BG2,
                  fg="#88aa88", font=("Segoe UI", 9)).pack(side="left", padx=8)
 
         # Scan confirm area (hidden until pending scan exists)
         self.scan_confirm_var = tk.StringVar(value="")
-        self.scan_confirm_frame = tk.Frame(sbar, bg=self.BG2)
+        self.scan_confirm_frame = tk.Frame(self.sbar, bg=self.BG2)
         self.scan_confirm_frame.pack(side="right", padx=8)
         self.scan_confirm_lbl = tk.Label(
             self.scan_confirm_frame, textvariable=self.scan_confirm_var,
@@ -749,6 +758,9 @@ class LiveAdvisor(tk.Tk):
         self.hn_var = tk.StringVar(value="")
         tk.Label(hf, textvariable=self.hn_var, bg=self.BG, fg="#ccc",
                  font=("Segoe UI", 16, "bold")).pack(side="left", padx=8)
+        self.input_badges_var = tk.StringVar(value="")
+        tk.Label(hf, textvariable=self.input_badges_var, bg=self.BG, fg="#8fae9a",
+                 font=("Segoe UI", 9, "bold"), justify="left").pack(side="left", padx=4)
 
         # Board cards
         bf = tk.Frame(disp, bg=self.BG)
@@ -760,11 +772,29 @@ class LiveAdvisor(tk.Tk):
             lbl.pack(side="left", padx=3)
             self.board_lbls.append(lbl)
 
-        # Quick card picker
-        picker = tk.Frame(self, bg=self.BG2, pady=6)
-        picker.pack(fill="x", padx=12, pady=(6, 0))
+        # Focus panel: one glance at the current decision.
+        self.focus_frame = tk.Frame(self, bg="#07130d", bd=1, relief="solid")
+        self.focus_frame.pack(fill="x", padx=12, pady=(2, 6))
+        self.focus_meta_var = tk.StringVar(value="")
+        tk.Label(self.focus_frame, textvariable=self.focus_meta_var,
+                 bg="#07130d", fg="#8fb99a", font=("Segoe UI", 10, "bold"),
+                 padx=8, pady=2).pack(anchor="w")
+        self.focus_action_var = tk.StringVar(value="Pick cards")
+        self.focus_action_lbl = tk.Label(
+            self.focus_frame, textvariable=self.focus_action_var, bg="#07130d",
+            fg=self.GOLD, font=("Segoe UI", 28, "bold"), wraplength=660,
+            padx=8, pady=2, justify="center")
+        self.focus_action_lbl.pack(fill="x")
+        self.focus_detail_var = tk.StringVar(value="")
+        tk.Label(self.focus_frame, textvariable=self.focus_detail_var,
+                 bg="#07130d", fg="#c8d8c8", font=("Segoe UI", 11),
+                 wraplength=660, padx=8, pady=(0, 6), justify="center").pack(fill="x")
 
-        rf = tk.Frame(picker, bg=self.BG2)
+        # Quick card picker
+        self.picker_frame = tk.Frame(self, bg=self.BG2, pady=6)
+        self.picker_frame.pack(fill="x", padx=12, pady=(6, 0))
+
+        rf = tk.Frame(self.picker_frame, bg=self.BG2)
         rf.pack(fill="x")
         self.rank_btns = {}
         for r in RANKS:
@@ -775,7 +805,7 @@ class LiveAdvisor(tk.Tk):
             btn.pack(side="left", padx=2, pady=2)
             self.rank_btns[r] = btn
 
-        sf = tk.Frame(picker, bg=self.BG2)
+        sf = tk.Frame(self.picker_frame, bg=self.BG2)
         sf.pack(fill="x", pady=(4, 0))
         self.suit_btns = {}
         self.pending_lbl = tk.Label(sf, text="", bg=self.BG2, fg="#888",
@@ -796,12 +826,15 @@ class LiveAdvisor(tk.Tk):
 
         # Texture
         self.texture_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.texture_var, bg=self.BG, fg="#77bbaa",
-                 font=("Segoe UI", 11), pady=2).pack()
+        self.texture_lbl = tk.Label(self, textvariable=self.texture_var, bg=self.BG,
+                                    fg="#77bbaa", font=("Segoe UI", 11), pady=2)
+        self.texture_lbl.pack()
         self.advice_warning_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.advice_warning_var, bg=self.BG,
-                 fg="#ffcc66", font=("Segoe UI", 10, "bold"), pady=1,
-                 wraplength=600).pack()
+        self.advice_warning_lbl = tk.Label(
+            self, textvariable=self.advice_warning_var, bg=self.BG,
+            fg="#ffcc66", font=("Segoe UI", 10, "bold"), pady=1,
+            wraplength=600)
+        self.advice_warning_lbl.pack()
 
         # PREFLOP
         pf = tk.Frame(self, bg="#1a2e20")
@@ -844,11 +877,87 @@ class LiveAdvisor(tk.Tk):
                  font=("Segoe UI", 10), anchor="w", padx=8, pady=2,
                  wraplength=600, justify="left").pack(fill="x")
         self.post_reason_var = tk.StringVar(value="")
-        tk.Label(res, textvariable=self.post_reason_var, bg=self.BG2, fg="#ccc",
-                 font=("Segoe UI", 11), wraplength=600, pady=2, justify="center").pack()
+        self.post_reason_lbl = tk.Label(
+            res, textvariable=self.post_reason_var, bg=self.BG2, fg="#ccc",
+            font=("Segoe UI", 11), wraplength=600, pady=2, justify="center")
+        self.post_reason_lbl.pack()
         self.sizing_var = tk.StringVar(value="")
-        tk.Label(res, textvariable=self.sizing_var, bg=self.BG2, fg="#ffcc66",
-                 font=("Segoe UI", 11, "bold"), pady=2).pack()
+        self.sizing_lbl = tk.Label(res, textvariable=self.sizing_var, bg=self.BG2,
+                                   fg="#ffcc66", font=("Segoe UI", 11, "bold"), pady=2)
+        self.sizing_lbl.pack()
+
+    def _bind_shortcuts(self):
+        self.bind_all("<F2>", lambda _e: self._shortcut_scan())
+        self.bind_all("<F3>", lambda _e: self._shortcut_clear())
+        self.bind_all("<F4>", lambda _e: self._toggle_compact())
+        self.bind_all("<Return>", lambda _e: self._shortcut_confirm(True))
+        self.bind_all("<Escape>", lambda _e: self._shortcut_confirm(False))
+
+    def _shortcut_scan(self):
+        self._manual_scan()
+        return "break"
+
+    def _shortcut_clear(self):
+        self._clear_hole()
+        return "break"
+
+    def _shortcut_confirm(self, accept):
+        if not self._pending_scan:
+            return None
+        if accept:
+            self._confirm_scan_accept()
+        else:
+            self._confirm_scan_reject()
+        return "break"
+
+    def _toggle_compact(self):
+        self._compact_mode = not self._compact_mode
+        if self._compact_mode:
+            if self.picker_frame.winfo_manager():
+                self.picker_frame.pack_forget()
+            if self.threats_frame.winfo_manager():
+                self.threats_frame.pack_forget()
+            self.compact_btn.config(text="FULL")
+            self.minsize(500, 320)
+            try:
+                self.geometry("720x430")
+            except Exception:
+                pass
+        else:
+            if not self.picker_frame.winfo_manager():
+                self.picker_frame.pack(
+                    fill="x", padx=12, pady=(6, 0), before=self.texture_lbl)
+            if not self.threats_frame.winfo_manager():
+                self.threats_frame.pack(
+                    fill="x", padx=20, pady=4, before=self.post_reason_lbl)
+            self.compact_btn.config(text="COMPACT")
+            self.minsize(500, 400)
+
+    def _set_focus_panel(self, meta, action, detail, color="#f0d060"):
+        self.focus_meta_var.set(meta or "")
+        self.focus_action_var.set(action or "")
+        self.focus_detail_var.set(detail or "")
+        self.focus_action_lbl.config(fg=color or self.GOLD)
+
+    def _input_badges_text(self, position_source=None):
+        badges = []
+        if self._hole_source == "manual":
+            badges.append("cards: manual")
+        elif self._hole_source == "confirmed-scan":
+            badges.append("cards: confirmed")
+        elif self._hole_source == "scan":
+            if self._hole_confidence is not None:
+                try:
+                    conf = int(float(self._hole_confidence) * 100)
+                    badges.append(f"cards: scan {conf}%")
+                except (TypeError, ValueError):
+                    badges.append("cards: scan")
+            else:
+                badges.append("cards: scan")
+        if position_source:
+            label = self._position_source_label(position_source)
+            badges.append(f"pos: {label or position_source}")
+        return "\n".join(badges)
 
     # ── Card Picker ───────────────────────────────────────────────────────────
     def _pick_rank(self, rank):
@@ -1965,6 +2074,11 @@ class LiveAdvisor(tk.Tk):
         pos = w.hero_position
         n_players = w.num_players
         context_warnings = []
+        focus_meta = "WAIT"
+        focus_action = "Pick cards"
+        focus_detail = ""
+        focus_color = "#888"
+        pos_source = getattr(w, "position_source", None)
 
         # Format call amount for display
         bb = w.bb_size if w.bb_size > 0 else 20000
@@ -1978,8 +2092,7 @@ class LiveAdvisor(tk.Tk):
             alive = len(w.occupied_seats) - len(w.folded_seats)
             parts.append(f"{alive}/{n_players}p")
         if pos:
-            src = getattr(w, "position_source", None)
-            src_label = self._position_source_label(src)
+            src_label = self._position_source_label(pos_source)
             parts.append(f"{pos}[{src_label}]" if src_label else pos)
         if w.street != 'preflop':
             parts.append(w.street.upper())
@@ -2007,6 +2120,7 @@ class LiveAdvisor(tk.Tk):
             else:
                 self._set_card_lbl(lbl, None, "#333")
         self.hn_var.set(hand_name(hole[0], hole[1]) if len(hole) == 2 else "")
+        self.input_badges_var.set(self._input_badges_text(pos_source))
 
         # Board cards
         for i, lbl in enumerate(self.board_lbls):
@@ -2055,6 +2169,11 @@ class LiveAdvisor(tk.Tk):
             self.pf_reason_var.set(
                 self._reason_with_warnings(pf["reason"], pf_warnings))
             self.pf_action_lbl.config(fg=guarded_color)
+            if len(board) < 3:
+                focus_meta = "PREFLOP"
+                focus_action = action_text
+                focus_detail = f"{pf.get('hand', '')} | {pf.get('reason', '')}"
+                focus_color = guarded_color
             # Strategy log: preflop advice
             if self.strategy_logger and w.hand_id:
                 try:
@@ -2074,6 +2193,10 @@ class LiveAdvisor(tk.Tk):
             self.pf_action_var.set("Pick cards..." if not hole else "Pick 2nd")
             self.pf_reason_var.set("")
             self.pf_action_lbl.config(fg="#888")
+            focus_meta = "WAIT"
+            focus_action = "Pick cards" if not hole else "Pick 2nd card"
+            focus_detail = ""
+            focus_color = "#888"
 
         # ── POSTFLOP ──────────────────────────────────────────────────────────
         if len(hole) == 2 and len(board) >= 3:
@@ -2130,6 +2253,12 @@ class LiveAdvisor(tk.Tk):
                     self._reason_with_warnings(r["reason"], post_warnings))
                 self.post_action_lbl.config(fg=guarded_color)
                 self.sizing_var.set(r.get("sizing", ""))
+                focus_meta = street_name
+                focus_action = action_text
+                focus_detail = " | ".join(x for x in (
+                    r.get("hand", ""), r.get("sizing", "")
+                ) if x)
+                focus_color = guarded_color
                 # ── ТИ ИМАШ / ТЕ БИЕ поленце ──
                 hero_label = r.get("hero_label", "")
                 threats = r.get("threats", [])
@@ -2158,6 +2287,11 @@ class LiveAdvisor(tk.Tk):
                 self.sizing_var.set("")
                 self.threats_have_var.set("")
                 self.threats_beat_var.set("")
+                context_warnings = ["card overlap"]
+                focus_meta = "ERROR"
+                focus_action = "Card overlap"
+                focus_detail = "Провери hole cards и board."
+                focus_color = "#ff6060"
         elif len(hole) == 2:
             self.post_action_var.set("Preflop")
             self.post_hand_var.set("")
@@ -2176,6 +2310,7 @@ class LiveAdvisor(tk.Tk):
             self.threats_beat_var.set("")
 
         self.advice_warning_var.set(self._warning_text(context_warnings))
+        self._set_focus_panel(focus_meta, focus_action, focus_detail, focus_color)
 
 
 if __name__ == "__main__":

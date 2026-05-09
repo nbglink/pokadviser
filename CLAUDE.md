@@ -124,6 +124,8 @@ BB, `call_amount == bb_size // 2` → SB. Counting fallback само когат�
 
 - Hole cards: manual pick (rank + suit бутони) ИЛИ auto-scan (когато checkbox е ON)
 - Board: auto от лог
+- Focus panel: показва само текущия decision (`PREFLOP/FLOP/TURN/RIVER`) + най-важния action за in-game glance
+- Compact mode: `COMPACT` бутона скрива manual picker + threat detail; `F2` scan, `F3` clear, `F4` compact, `Enter/Esc` accept/reject scan confirm
 - Auto-scan flow: MSG_0080 → delay (500ms) → scanner.scan() → ако conf ≥ auto_confirm → apply; иначе confirm UI
 - Advice warning line: `VERIFY:` appears for fallback/D-scan position, low-confidence auto-scan cards, estimated pot/SPR, unknown stack, or multiway tightening
 - Training mode: всяко ръчно въвеждане записва templates (disabled в production)

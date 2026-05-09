@@ -15,6 +15,7 @@ with OCR, and provides GTO-aligned advice on every street.
 - **"YOU HAVE / YOU LOSE TO" panel** with hand classification + threats
 - **Multiway adjustment**, SPR buckets, board texture analysis
 - **Context guardrails** for uncertain OCR, fallback position, pot/SPR estimates
+- **Focus panel + compact mode** for one-glance decisions during play
 - Supports 6-max cash and fast-fold pools
 
 ## Files
@@ -45,6 +46,11 @@ python poker_live.py
 
 The GUI will open. First press **"Calibrate"** to mark the hole card region
 (2 clicks on the table window). Then you can enable auto-scan.
+
+Useful in-game controls:
+- `COMPACT` hides manual picker/threat detail for a smaller overlay.
+- `F2` scans now, `F3` clears cards, `F4` toggles compact mode.
+- `Enter` accepts a pending scan confirmation; `Esc` rejects it.
 
 Calibration is local to the machine. The app writes `scanner_config.json`,
 which is ignored by git; use `scanner_config.example.json` as the template.
