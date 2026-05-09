@@ -73,8 +73,11 @@ POS_NAMES_6 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'MP', 5:'CO'}
 POS_NAMES_5 = {0:'BTN', 1:'SB', 2:'BB', 3:'UTG', 4:'CO'}
 POS_NAMES_4 = {0:'BTN', 1:'SB', 2:'BB', 3:'CO'}
 POS_NAMES_3 = {0:'BTN', 1:'SB', 2:'BB'}
+# Heads-up: BTN играе SB blind (acts first preflop, last postflop).
+POS_NAMES_2 = {0:'BTN', 1:'BB'}
 
-_POS_MAPS = {3: POS_NAMES_3, 4: POS_NAMES_4, 5: POS_NAMES_5, 6: POS_NAMES_6,
+_POS_MAPS = {2: POS_NAMES_2,
+             3: POS_NAMES_3, 4: POS_NAMES_4, 5: POS_NAMES_5, 6: POS_NAMES_6,
              7: POS_NAMES_7, 8: POS_NAMES_8, 9: POS_NAMES_9}
 
 
@@ -104,7 +107,7 @@ def _seat_angles(num_players):
 def _btn_slot_from_angle(angle_deg, num_players):
     """Map ъгъл (в градуси, 0=изток, 90=север) → visual seat slot (0..n-1).
     Slot 0 = hero (south). Избира най-близкия angular slot."""
-    n = max(3, min(9, int(num_players)))
+    n = max(2, min(9, int(num_players)))
     angles = _seat_angles(n)
 
     def ang_diff(a, b):
@@ -128,13 +131,27 @@ def position_from_dealer_ratio(x_ratio, y_ratio, num_players,
     """Преобразува detected D позиция → hero position name.
 
     Връща (position_str, visual_slot, angle_deg, angular_error_deg).
-    Ако angular_error > 30° → detection е unreliable (връщаме '?')."""
+    Ако angular_error > 30° → detection е unreliable (връщаме '?').
+
+    Heads-up special case (num_players == 2): opponent could be
+    seated at any of the visual seats (на 6-max table, например).
+    Geometry-based slot matching се проваля защото опонентът не е
+    задължително "north". Ползваме south-vs-north rule:
+    D в долната половина на масата (близо до hero) → hero е BTN;
+    D в горната половина → hero е BB.
+    """
     import math
     dx = x_ratio - table_cx
     dy = table_cy - y_ratio  # flip Y (screen Y grows down)
     if abs(dx) < 0.01 and abs(dy) < 0.01:
         return ('?', -1, 0.0, 999.0)
     angle = math.degrees(math.atan2(dy, dx))
+    if int(num_players) == 2:
+        # HU: split table by horizontal midline. y_ratio > table_cy ↔
+        # бутонът е под центъра (close to hero) → hero има D = BTN.
+        if y_ratio > table_cy:
+            return ('BTN', 0, angle, 0.0)  # hero has D
+        return ('BB', 1, angle, 0.0)        # opponent has D
     slot, err = _btn_slot_from_angle(angle, num_players)
     if err > 30:
         return ('?', slot, angle, err)
@@ -201,9 +218,10 @@ def decode_log_card(s):
 def pos_name(offset_from_btn, num_players):
     """Get position name from offset (0=BTN, 1=SB, ...) and player count.
 
-    Supports 3-9 max tables. За 7-9 max крайните позиции се collapse-ват към
-    най-близката 6-max група, защото strategy engine знае само 6 имена."""
-    n = max(3, min(9, int(num_players)))
+    Supports 2-9 max tables (2 = heads-up). За 7-9 max крайните позиции
+    се collapse-ват към най-близката 6-max група, защото strategy engine
+    знае само 6 имена."""
+    n = max(2, min(9, int(num_players)))
     return _POS_MAPS[n].get(offset_from_btn % n, '?')
 
 
@@ -1849,8 +1867,18 @@ class LiveAdvisor(tk.Tk):
             if not auto:
                 self.status_var.set("D чипът не е намерен")
             return None
-        n = (self.watcher.num_players
-             or self.watcher._view_num_players or 6)
+        # HU detection: ако има само 2 active players (било то на 6-max
+        # маса или другаде), използваме 2-player position logic. Този
+        # case се проваляше на стандартния N-seat angle matcher, защото
+        # опонентът може да е на ВСЕКИ от visual seats.
+        active_count = (
+            len(self.watcher.occupied_seats) - len(self.watcher.folded_seats)
+        )
+        if active_count == 2:
+            n = 2
+        else:
+            n = (self.watcher.num_players
+                 or self.watcher._view_num_players or 6)
         chosen = choose_dealer_candidate(det, n)
         if chosen is not None:
             det = {**det, **chosen}
@@ -2110,8 +2138,15 @@ class LiveAdvisor(tk.Tk):
         """Override watcher position from manual D pin."""
         self._manual_button_pos = (x_ratio, y_ratio)
         self._manual_button_hand_id = self.watcher.hand_id
-        n = (self.watcher.num_players
-             or self.watcher._view_num_players or 6)
+        # HU detection: 2 active players → use 2-player logic
+        active_count = (
+            len(self.watcher.occupied_seats) - len(self.watcher.folded_seats)
+        )
+        if active_count == 2:
+            n = 2
+        else:
+            n = (self.watcher.num_players
+                 or self.watcher._view_num_players or 6)
         pos, slot, ang, err = position_from_dealer_ratio(
             x_ratio, y_ratio, n)
         if pos != '?':
