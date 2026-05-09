@@ -264,6 +264,60 @@ class StrategyEngineTests(unittest.TestCase):
         )
         self.assertTrue(r.get("is_3bet_pot"))
 
+    # ── Tier 2: range vs range + mixed frequency ──
+
+    def test_range_strength_returns_float(self):
+        btn = strategy.OPEN_RANGES.get("BTN", set())
+        s = strategy.range_strength(btn, [("A", "d"), ("7", "c"), ("2", "h")])
+        self.assertIsInstance(s, float)
+        self.assertGreater(s, 0)
+        self.assertLess(s, 9)  # bounded by hierarchy span
+
+    def test_range_vs_range_symmetric(self):
+        # delta(A vs B) == -delta(B vs A) on same board
+        adv_ab = strategy.range_vs_range_advantage(
+            "CO", "BTN", [("A", "d"), ("7", "c"), ("2", "h")])
+        adv_ba = strategy.range_vs_range_advantage(
+            "BTN", "CO", [("A", "d"), ("7", "c"), ("2", "h")])
+        self.assertAlmostEqual(adv_ab["delta"], -adv_ba["delta"], places=2)
+
+    def test_range_vs_range_falls_back_to_co_for_missing(self):
+        # BB has no opening range — function falls back to CO as proxy
+        # (commonly BB defending range is similar in width to CO open).
+        adv = strategy.range_vs_range_advantage(
+            "CO", "BB", [("A", "d"), ("7", "c"), ("2", "h")])
+        self.assertIsNotNone(adv)
+        # When both sides effectively use CO range, delta ≈ 0
+        self.assertLess(abs(adv["delta"]), 0.01)
+
+    def test_mixed_freq_pure_when_far_apart(self):
+        f = strategy.mixed_frequency_from_ev(5.0, 0.0)
+        self.assertEqual(f, (100, 0))
+
+    def test_mixed_freq_50_50_when_close(self):
+        f = strategy.mixed_frequency_from_ev(1.0, 0.7)
+        self.assertEqual(f, (50, 50))
+
+    def test_mixed_freq_intermediate(self):
+        # diff = 1.0 (between 0.5 and 1.5) → linear interpolation
+        f = strategy.mixed_frequency_from_ev(2.0, 1.0)
+        self.assertEqual(sum(f), 100)
+        self.assertGreater(f[0], 50)  # primary > 50
+        self.assertLess(f[0], 100)    # but less than 100
+
+    def test_postflop_returns_alt_action_keys(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h"), ("5", "s"), ("8", "d")],
+            facing_bet=False, hero_pos="CO", villain_pos="BTN",
+            stack_bb=15, pot_bb=10,
+        )
+        # Whether mixed or pure, the keys exist
+        self.assertIn("alt_action", r)
+        self.assertIn("alt_freq", r)
+        self.assertIn("primary_freq", r)
+        self.assertIn("range_advantage", r)
+
 
 if __name__ == "__main__":
     unittest.main()

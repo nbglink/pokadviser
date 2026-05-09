@@ -885,6 +885,10 @@ class LiveAdvisor(tk.Tk):
                                         fg=self.GOLD, font=("Segoe UI", 22, "bold"),
                                         wraplength=600, pady=4)
         self.post_action_lbl.pack()
+        # ── Alternative action (mixed frequency display) ──
+        self.alt_action_var = tk.StringVar(value="")
+        tk.Label(res, textvariable=self.alt_action_var, bg=self.BG2,
+                 fg="#999999", font=("Segoe UI", 10, "italic"), pady=1).pack()
         self.post_hand_var = tk.StringVar(value="")
         tk.Label(res, textvariable=self.post_hand_var, bg=self.BG2, fg="#aaddaa",
                  font=("Segoe UI", 12), pady=2).pack()
@@ -2355,6 +2359,15 @@ class LiveAdvisor(tk.Tk):
                 if facing:
                     action_text = f"[vs BET {call_bb:.1f}BB] {action_text}"
                 self.post_action_var.set(f"[{street_name}] {action_text}")
+                # Mixed frequency: show alternative action below banner
+                alt_a = r.get("alt_action")
+                alt_f = r.get("alt_freq")
+                p_f = r.get("primary_freq")
+                if alt_a and alt_f:
+                    self.alt_action_var.set(
+                        f"mix: primary {p_f}%  ·  alt: {alt_a} ({alt_f}%)")
+                else:
+                    self.alt_action_var.set("")
                 self.post_hand_var.set(r['hand'])
                 self.post_reason_var.set(
                     self._reason_with_warnings(r["reason"], post_warnings))
@@ -2420,6 +2433,7 @@ class LiveAdvisor(tk.Tk):
                 self.threats_have_var.set("")
                 self.threats_beat_var.set("")
                 self.decision_strip_var.set("")
+                self.alt_action_var.set("")
                 self._apply_threat_colors(None)
                 context_warnings = ["card overlap"]
                 focus_meta = "ERROR"
@@ -2435,6 +2449,7 @@ class LiveAdvisor(tk.Tk):
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
             self.decision_strip_var.set("")
+            self.alt_action_var.set("")
             self._apply_threat_colors(None)
         else:
             self.post_action_var.set("")
@@ -2445,6 +2460,7 @@ class LiveAdvisor(tk.Tk):
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
             self.decision_strip_var.set("")
+            self.alt_action_var.set("")
             self._apply_threat_colors(None)
 
         self.advice_warning_var.set(self._warning_text(context_warnings))
