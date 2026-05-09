@@ -179,6 +179,91 @@ class StrategyEngineTests(unittest.TestCase):
         # spurious boat downgrade for trips.
         self.assertNotIn("boat заплаха", r["action"])
 
+    # ── Tier 1 bundle tests (EV-turn, 3-bet pot, blockers) ──
+
+    def test_blocker_note_nut_flush(self):
+        # Hero has Ace of board's dominant suit
+        note = strategy._blocker_note(
+            [("A", "h"), ("K", "c")],
+            [("5", "h"), ("7", "h"), ("2", "h")],
+            "high_card",
+        )
+        self.assertIn("nut flush", note)
+
+    def test_blocker_note_high_straight(self):
+        # Hero has 9 on 5-6-7-8 → blocks 5-9 straight
+        note = strategy._blocker_note(
+            [("9", "c"), ("K", "d")],
+            [("5", "h"), ("6", "c"), ("7", "d"), ("8", "s")],
+            "high_card",
+        )
+        self.assertIn("straight", note)
+
+    def test_blocker_note_no_blocker(self):
+        # Random hand with no blockers
+        note = strategy._blocker_note(
+            [("2", "c"), ("3", "d")],
+            [("K", "h"), ("Q", "s"), ("J", "d")],
+            "high_card",
+        )
+        self.assertEqual(note, "")
+
+    def test_3bet_pot_smaller_sizing_on_wet_board(self):
+        # 3-bet pot on wet QJ9 → sizing override to ~33%
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("Q", "h"), ("J", "h"), ("9", "d")],
+            facing_bet=False, hero_pos="CO", villain_pos="BTN",
+            stack_bb=80, pot_bb=20, num_opponents=1, is_3bet_pot=True,
+        )
+        # Sizing should mention 3-bet pot or be 25-33%
+        self.assertTrue(
+            "3-bet" in r["sizing"]
+            or "25-33" in r["sizing"]
+            or "33%" in r["sizing"],
+            r["sizing"],
+        )
+
+    def test_3bet_pot_annotation_in_reason(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("Q", "h"), ("J", "h"), ("9", "d")],
+            facing_bet=False, hero_pos="CO", is_3bet_pot=True,
+            stack_bb=80, pot_bb=20,
+        )
+        self.assertIn("3-bet pot", r["reason"])
+
+    def test_ev_turn_call_when_positive(self):
+        # TPTK on dry turn facing 50% pot bet → likely +EV call
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h"), ("5", "s")],
+            facing_bet=True, hero_pos="CO", villain_pos="BTN",
+            stack_bb=20, pot_bb=10, call_bb=5, num_opponents=1,
+        )
+        # Should be CALL with EV reasoning
+        self.assertIn("CALL", r["action"])
+        self.assertIn("turn", r["reason"].lower())
+
+    def test_ev_turn_includes_draw_equity(self):
+        # Hero has overcards + flush draw on turn → effective eq high
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "h")],
+            [("Q", "h"), ("7", "h"), ("2", "c"), ("5", "s")],
+            facing_bet=True, hero_pos="CO", villain_pos="BTN",
+            stack_bb=20, pot_bb=10, call_bb=8, num_opponents=1,
+        )
+        # Reason should reference draw equity bonus
+        self.assertIn("turn", r["reason"].lower())
+
+    def test_3bet_pot_returned_in_dict(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("Q", "h"), ("5", "c"), ("2", "d")],
+            facing_bet=False, hero_pos="CO", is_3bet_pot=True,
+        )
+        self.assertTrue(r.get("is_3bet_pot"))
+
 
 if __name__ == "__main__":
     unittest.main()

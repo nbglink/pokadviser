@@ -2332,7 +2332,8 @@ class LiveAdvisor(tk.Tk):
 
                 r = postflop_analyze(hole, board, facing_bet=facing, hero_pos=pos, villain_pos=vp,
                                      stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp,
-                                     call_bb=(call_bb if facing else None))
+                                     call_bb=(call_bb if facing else None),
+                                     is_3bet_pot=bool(getattr(w, 'facing_raise_preflop', False)))
                 post_warnings = self._context_warnings(
                     position_source=getattr(w, "position_source", None),
                     hero_pos=pos,
