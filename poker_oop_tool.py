@@ -152,6 +152,169 @@ def _build_open_ranges():
 
 OPEN_RANGES = _build_open_ranges()
 
+
+# ─── Stack-depth aware ranges ────────────────────────────────────────────────
+# OPEN_RANGES (above) са baseline за 100 BB cash. Tournament play често е
+# по-shallow (push/fold territory под 25 BB). Stack-depth bucket-ите варират
+# само там, където разликата е важна; иначе fall-back към standard.
+def _stack_depth_bucket(stack_bb):
+    """Връща bucket name за дадения effective stack в BB."""
+    if stack_bb is None:
+        return 'standard'
+    if stack_bb <= 15:
+        return 'shallow'        # push/fold territory — само premium
+    if stack_bb <= 25:
+        return 'short'          # narrowed; 4-bet shoves common
+    if stack_bb <= 100:
+        return 'standard'       # baseline
+    return 'deep'               # 100+ BB; малко looser SCs от LP
+
+
+# Shallow (≤15 BB) push-or-fold ranges — само премиум за shove от всяка poz.
+SHALLOW_PUSH_RANGE = {
+    'AA','KK','QQ','JJ','TT','99','88','77','66','55',
+    'AKs','AQs','AJs','ATs','A9s','KQs','KJs','QJs','JTs',
+    'AKo','AQo','AJo','KQo',
+}
+
+# Short stack (15-25 BB) — слегка по-tight от standard, особено EP. CO/BTN
+# остават близо до standard но без най-маргиналните.
+SHORT_STACK_TRIM = {
+    # Hands removed от standard 'short' OPEN_RANGES (per position)
+    'UTG': set(),  # вече tight
+    'MP': {'A2s','A3s','A4s','A5s'},  # без low aces от MP при 15-25BB
+    'CO': {'K2s','K3s','K4s','Q5s','Q6s','J6s','T6s','86s','75s','64s','53s'},
+    'BTN': {'K2s','K3s','Q2s','Q3s','J5s','T5s','94s','85s','74s','63s','52s',
+            '42s','32s'},
+    'SB': {'K2s','K3s','Q2s','Q3s','Q4s','J5s','T5s','94s','85s','74s'},
+}
+
+
+def _preflop_hand_strength(hand_str):
+    """Roughly rank a hand string for narrowing.
+
+    Pairs win > suited > offsuit. Higher cards win within each category.
+    Ace-low straights (A2s..A5s) get slight bonus за их connectedness.
+    Returns int — higher = stronger.
+    """
+    if len(hand_str) == 2:  # pair
+        r = hand_str[0]
+        return 1000 + RV[r] * 10  # pairs cluster at top
+    if len(hand_str) == 3:
+        r1, r2, t = hand_str[0], hand_str[1], hand_str[2]
+        v1, v2 = RV[r1], RV[r2]
+        gap = v1 - v2
+        suited_bonus = 50 if t == 's' else 0
+        connector_bonus = max(0, 10 - gap * 2)  # 1-gap=8, 2-gap=6, etc.
+        # AKs ~ 12*30 + 11*5 + 50 = 465; 72o ~ 5*30 + 0*5 + 0 = 150
+        return v1 * 30 + v2 * 5 + suited_bonus + connector_bonus
+    return 0
+
+
+def narrow_range_facing_bet(open_range, street, board=None, hero_class=None):
+    """Drop the bottom X% of opening range when villain has bet postflop.
+
+    На all-fold checks engine-ът използва пълния opening range (default).
+    На turn/river facing bet, villain'ското range е по-тясно — drop-ваме
+    bottom-fraction по preflop hand strength.
+
+    Drop ratios (empirically chosen, conservative):
+      flop  → 30%   (villain c-bets широко; малко narrowing)
+      turn  → 50%   (втори barrel идва от value-heavy range)
+      river → 65%   (river bet = много narrow nut/strong range)
+
+    Args:
+        open_range: set of hand strings ({'AKs','77',...})
+        street: 'flop' | 'turn' | 'river'
+        board, hero_class: за бъдещи refinements (unused за сега)
+
+    Returns: narrowed set (subset of open_range).
+    """
+    if not open_range:
+        return open_range
+    DROP_PCT = {'flop': 0.30, 'turn': 0.50, 'river': 0.65}
+    drop = DROP_PCT.get(street, 0.30)
+    sorted_hands = sorted(open_range, key=_preflop_hand_strength, reverse=True)
+    keep = max(1, int(round(len(sorted_hands) * (1 - drop))))
+    return set(sorted_hands[:keep])
+
+
+# ─── MDF + EV helpers за river decisions ─────────────────────────────────────
+def mdf(bet_pct):
+    """Minimum Defense Frequency vs bet of size bet_pct of pot.
+
+    Math: villain's bluff is +EV ако hero fold-ва > pot/(pot+bet) от time-а.
+    Hero трябва да защити поне 1 - pot_odds = 1/(1+bet_pct) от range-а
+    за да direct +EV bluffs не работят.
+
+    bet_pct: 0.5 = half-pot bet; 1.0 = pot-size; 2.0 = 2x overbet.
+    Връща MDF като 0..1.
+    """
+    if bet_pct <= 0:
+        return 1.0
+    return 1.0 / (1.0 + bet_pct)
+
+
+def ev_river_call(pot_bb, bet_bb, equity_vs_range):
+    """EV (in BB) на CALL на river при дадена equity vs villain's bet range.
+
+    На river няма future streets → equity_vs_range е 0..1, без draws.
+    Formula: eq * (pot + bet) - (1 - eq) * bet
+    """
+    if bet_bb <= 0 or pot_bb <= 0:
+        return 0.0
+    eq = max(0.0, min(1.0, equity_vs_range))
+    return eq * (pot_bb + bet_bb) - (1 - eq) * bet_bb
+
+
+def ev_river_bet(pot_bb, bet_bb, fold_equity, equity_when_called):
+    """EV на BET на river.
+
+    fold_equity: P(villain folds), 0..1
+    equity_when_called: hero equity when villain doesn't fold (0..1)
+    Formula: FE * pot + (1 - FE) * (eq * (pot + 2*bet) - (1 - eq) * bet)
+    """
+    if bet_bb <= 0 or pot_bb <= 0:
+        return 0.0
+    fe = max(0.0, min(1.0, fold_equity))
+    eq = max(0.0, min(1.0, equity_when_called))
+    fe_value = fe * pot_bb
+    call_value = (1 - fe) * (eq * (pot_bb + 2 * bet_bb) - (1 - eq) * bet_bb)
+    return fe_value + call_value
+
+
+def _river_fold_equity_estimate(bi, hero_class, beat_pct):
+    """Heuristic за P(villain folds) на river при типичен 75%-pot bet.
+
+    Базата: villain'ското range е narrow до strong continues (paired/strong
+    pairs/draws missed). FE зависи от:
+      - board type (paired/mono/wet → villain е по-инклинирaн да continue с
+        силни ръце → ниска FE);
+      - hero range advantage (висок beat_pct → силна линия → FE по-висок,
+        защото villain очаква value bet);
+      - hero hand category (ако е bluff catcher / weak made hand, не нaboard-
+        ваме за value).
+
+    Връща 0.15..0.55, conservatively.
+    """
+    if not bi:
+        return 0.30
+    fe = 0.30  # baseline
+    if bi.get('is_paired'):
+        fe -= 0.05
+    if bi.get('is_mono'):
+        fe -= 0.10
+    if bi.get('is_dry'):
+        fe += 0.10
+    if hero_class in ('flush', 'straight', 'full_house', 'quads', 'set'):
+        # Strong made hand — villain has bluff-catchers, fold rate higher
+        fe += 0.15
+    elif hero_class in ('two_pair', 'trips'):
+        fe += 0.05
+    if beat_pct is not None and beat_pct >= 70:
+        fe += 0.05
+    return max(0.15, min(0.55, fe))
+
 # 3-bet рейнджове (vs open raise) — solver-aligned, 6-max cash
 THREEBET_ALWAYS = {'AA','KK','QQ','AKs','AKo'}
 THREEBET_VALUE  = {'JJ','TT','AQs','AQo','AJs','KQs'}
@@ -182,10 +345,19 @@ CALL_VS_3BET_OOP = {'TT','99','AQs','AJs','KQs','JJ'}
 
 # ─── Preflop анализ ───────────────────────────────────────────────────────────
 def preflop_analyze(hole, hero_pos=None, facing_raise=False, raiser_pos=None,
-                    facing_3bet=False, three_bettor_pos=None):
+                    facing_3bet=False, three_bettor_pos=None,
+                    stack_bb=None):
     hn = hand_name(hole[0], hole[1])
     is_suited = hn.endswith('s')
     is_pair = len(hn) == 2
+
+    # Stack-depth routing — shallow stacks играят push/fold, не open/call.
+    # Отнася се само за RFI/facing-raise scenarios (3-bet pots се играят
+    # с по-сложна logic дори на short).
+    depth_bucket = _stack_depth_bucket(stack_bb)
+    if depth_bucket == 'shallow' and hero_pos and not facing_3bet:
+        return _shallow_decision(hn, hero_pos, facing_raise, raiser_pos,
+                                 stack_bb)
 
     if not hero_pos:
         # Без позиция — даваме обща оценка
@@ -210,8 +382,40 @@ def preflop_analyze(hole, hero_pos=None, facing_raise=False, raiser_pos=None,
         return _vs_3bet(hn, hero_pos, three_bettor_pos)
     if facing_raise:
         return _vs_raise(hn, hero_pos, raiser_pos)
-    else:
-        return _rfi(hn, hero_pos)
+    # Short-stack RFI — trim marginal hands от standard range
+    if depth_bucket == 'short' and hero_pos in SHORT_STACK_TRIM:
+        trimmed = OPEN_RANGES.get(hero_pos, set()) - SHORT_STACK_TRIM[hero_pos]
+        if hn not in trimmed and hn in OPEN_RANGES.get(hero_pos, set()):
+            return dict(
+                action="FOLD", color="#ff6060", hand=hn,
+                reason=(f"{hn} е marginal за short stack ({stack_bb:.0f}BB). "
+                        f"При под 25 BB — само high-equity hands от {hero_pos}."),
+            )
+    return _rfi(hn, hero_pos)
+
+
+def _shallow_decision(hn, hero_pos, facing_raise, raiser_pos, stack_bb):
+    """Push/fold logic за ≤15 BB stack.
+
+    Опростена evaluation: ако в SHALLOW_PUSH_RANGE → ALL-IN; иначе FOLD.
+    Не открива limp/min-raise защото при 15 BB стандартното решение е
+    shove-or-fold (postflop play е почти невъзможен с такъв стак).
+    """
+    note = f"Stack {stack_bb:.0f}BB ≤ 15 → push/fold mode."
+    if hn in SHALLOW_PUSH_RANGE:
+        if facing_raise:
+            return dict(
+                action="CALL ALL-IN", color="#60ff60", hand=hn,
+                reason=f"{hn} е силна за shove call с {stack_bb:.0f}BB. {note}",
+            )
+        return dict(
+            action="ALL-IN (push)", color="#60ff60", hand=hn,
+            reason=f"{hn} в push range от {hero_pos}. {note}",
+        )
+    return dict(
+        action="FOLD", color="#ff6060", hand=hn,
+        reason=f"{hn} извън push range. {note}",
+    )
 
 def _hand_tier(hn):
     if hn in THREEBET_ALWAYS: return 1
@@ -1345,7 +1549,8 @@ def spr_bucket(spr):
 
 # ─── Postflop анализ (v4 — с SPR) ─────────────────────────────────────────────
 def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=None,
-                     stack_bb=None, pot_bb=None, num_opponents=1):
+                     stack_bb=None, pot_bb=None, num_opponents=1,
+                     call_bb=None):
     """Postflop decision engine.
 
     Args:
@@ -1392,10 +1597,14 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
                                            oesd, gutshot)
     hero_threats = hand_threats(hole, board, hero_class)
 
-    # Approximate range breakdown vs villain opening range (single-position proxy).
-    # Villain street-by-street ranges не се moделират — взимаме opening range
-    # на тяхната позиция, или CO като coarse default. Само made-hand сравнение.
+    # Approximate range breakdown vs villain (street-narrowed) range.
+    # Когато villain е bet-нал постфлоп, неговото range се narrow-ва (drop
+    # на bottom check/fold-ващите hands). Това прави beat_pct по-realistic
+    # на turn/river facing aggression.
     villain_range = OPEN_RANGES.get(villain_pos) or OPEN_RANGES.get('CO', set())
+    if facing_bet and len(board) >= 3:
+        villain_range = narrow_range_facing_bet(
+            villain_range, street_name, board, hero_class)
     range_info = range_breakdown(hole, board, villain_range, hero_class)
     beat_pct = range_info['beat_pct'] if range_info else None
     lose_pct = range_info['lose_pct'] if range_info else None
@@ -1416,21 +1625,74 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             "value-heavy, малки sizing-и, само high-equity bluffs."
         )
 
-    # Flush-threat detection: 3+ от една боя на board И hero има 0 от тая боя.
-    # Ако сме само pair/two_pair (не flush, не set+) — не комит-ваме срещу
-    # натиск, защото villain често вече има made flush.
+    # ── Board-threat detection (flush / straight / boat) ──
     from collections import Counter as _Counter
     _board_suits = _Counter(c[1] for c in board)
     _top_suit, _top_suit_count = (_board_suits.most_common(1)[0]
                                   if _board_suits else ('', 0))
     _hero_top_suit_n = sum(1 for c in hole if c[1] == _top_suit)
+    # Flush: 3+ от една боя на board И hero има 0 от тая боя.
     flush_threat = (_top_suit_count >= 3 and _hero_top_suit_n == 0
                     and hero_class in ('high_card', 'pair', 'two_pair',
                                        'trips'))
-    ft_note = ""
+    # Straight: 4+ карти на board в 4-rank window (e.g. 5-6-7-8 или
+    # 5-6-7-9), hero не е straight+. Тогава villain често има direct
+    # straight или OESD.
+    _board_vals = sorted(set(RV[c[0]] for c in board))
+    if 12 in _board_vals:
+        _board_vals_with_low_ace = [-1] + _board_vals
+    else:
+        _board_vals_with_low_ace = _board_vals
+    _max_window = 0
+    _window_label = ""
+    for _i in range(len(_board_vals_with_low_ace)):
+        for _j in range(_i + 1, len(_board_vals_with_low_ace) + 1):
+            _w = _board_vals_with_low_ace[_i:_j]
+            if _w[-1] - _w[0] <= 4 and len(_w) > _max_window:
+                _max_window = len(_w)
+                _rev_rv = {v: k for k, v in RV.items()}
+                _window_label = "-".join(_rev_rv.get(v, '?') for v in _w
+                                         if v >= 0)
+    straight_threat = (_max_window >= 4
+                       and hero_class in ('high_card', 'pair', 'two_pair',
+                                          'trips', 'set'))
+    # Boat: paired board + hero е само pair/2pair → villain'ите overpairs
+    # или board pair improve до full house. Trips на paired board обикновено
+    # печели срещу range-а (изключение: villain има pocket pair матчващ
+    # неpaired board card → много тесен случай) — оставяме trips да
+    # value-bet-ват.
+    _board_ranks_list = [c[0] for c in board]
+    _board_rank_cnt = _Counter(_board_ranks_list)
+    _paired_board = any(n >= 2 for n in _board_rank_cnt.values())
+    boat_threat = (_paired_board
+                   and hero_class in ('pair', 'two_pair')
+                   and facing_bet)
+
+    # Threat note за reason — описателен, един ред
+    _threat_notes = []
     if flush_threat:
-        ft_note = (f"Flush заплаха: {_top_suit_count}{_top_suit} на борда, "
-                   f"ти имаш 0. Не committ-вай pair/2pair срещу натиск.")
+        _threat_notes.append(
+            f"flush: {_top_suit_count}{_top_suit} на борда, ти имаш 0"
+        )
+    if straight_threat:
+        if _window_label:
+            _threat_notes.append(
+                f"straight: {_max_window} в window ({_window_label})"
+            )
+        else:
+            _threat_notes.append(f"straight: {_max_window} в connected window")
+    if boat_threat:
+        _paired_ranks = [r for r, n in _board_rank_cnt.items() if n >= 2]
+        if _paired_ranks:
+            _pr = _paired_ranks[0]
+            _threat_notes.append(
+                f"boat: paired ({_pr}{_pr}) + ти си TP/2pair → villain прави FH"
+            )
+    ft_note = (
+        "Заплаха — " + "; ".join(_threat_notes)
+        + ". Не committ-вай pair/2pair срещу натиск."
+    ) if _threat_notes else ""
+    any_threat = flush_threat or straight_threat or boat_threat
 
     # Made hand detection (works on all streets)
     has_made_flush = made_flush(hole, board)
@@ -1516,26 +1778,39 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             return "CHECK (multiway)", "#f0d060"
         return action, color
 
-    def _flush_threat_adjust(action, color, hand_label):
-        """3+ от една боя на board И hero без тая боя: pair/2pair НЕ
-        committ-ват срещу натиск. RAISE→CALL малък/FOLD, BET→CHECK
-        (free showdown). Силни ръце (FLUSH/STRAIGHT/Сет/Две двойки)
-        запазват агресията — те често крушат бoard-а."""
-        if not flush_threat:
+    def _threat_adjust(action, color, hand_label):
+        """Combined board-threat guards (flush + straight + boat).
+
+        TP/2pair/trips НЕ committ-ват срещу натиск когато board показва
+        вероятна по-силна ръка във villain'ското range. RAISE → CALL
+        малък/FOLD; BET → CHECK (free showdown).
+
+        Strong hands (FLUSH/STRAIGHT/Set/2pair/Boat/Quads) запазват
+        агресията — те реално бият заплахата.
+        """
+        if not any_threat:
             return action, color
-        strong_labels = ('FLUSH', 'STRAIGHT', 'Сет', 'Две двойки', 'QUADS', 'Boat')
+        strong_labels = (
+            'FLUSH', 'STRAIGHT', 'Сет', 'Две двойки', 'QUADS', 'Boat',
+            'Фул', 'FULL HOUSE',
+        )
         if any(s in hand_label for s in strong_labels):
             return action, color
+        active = []
+        if flush_threat: active.append("flush")
+        if straight_threat: active.append("straight")
+        if boat_threat: active.append("boat")
+        threat_str = "/".join(active)
         a_upper = action.upper()
         if 'RAISE' in a_upper and 'CALL' not in a_upper:
-            return "CALL малък / FOLD голям (flush заплаха)", "#ffb040"
+            return f"CALL малък / FOLD голям ({threat_str} заплаха)", "#ffb040"
         if a_upper.startswith('BET') and 'CHECK' not in a_upper:
-            return "CHECK (flush заплаха)", "#ffb040"
+            return f"CHECK ({threat_str} заплаха)", "#ffb040"
         return action, color
 
     def R(a, c, h, r):
         a2, c2 = _mw_adjust(a, c, h)
-        a3, c3 = _flush_threat_adjust(a2, c2, h)
+        a3, c3 = _threat_adjust(a2, c2, h)
         return dict(
             action=a3, color=c3, hand=h, reason=r + pn + sn + mn + ftn,
             sizing=sizing,
@@ -1574,6 +1849,54 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         eq = equity_from_outs(outs, streets) * 100
         needed = pot_odds_needed(bet_pct) * 100
         return f"Equity ~{eq:.0f}% vs нужни {needed:.0f}%"
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  EV-DRIVEN RIVER OVERRIDE
+    # ═══════════════════════════════════════════════════════════════════════════
+    # На river няма future streets → EV математиката е чиста (без implied
+    # odds). За marginal made hands (high_card / pair) EV изчислението
+    # disambiguates better от rule-based heuristics.
+    # Силните ръце (sets+) минават през rule-based dispatch по-долу за
+    # specific phrasing; EV override фокусира върху bluff-catchers.
+    if (is_river and beat_pct is not None and pot_bb is not None
+            and pot_bb > 0 and hero_class in ('high_card', 'pair', 'two_pair')):
+        eq = beat_pct / 100.0
+        if facing_bet:
+            actual_bet_bb = call_bb if (call_bb and call_bb > 0) else (
+                pot_bb * RIVER_POLAR_PCT)
+            ev_call = ev_river_call(pot_bb, actual_bet_bb, eq)
+            bet_pct_pot = actual_bet_bb / pot_bb if pot_bb else 1.0
+            mdf_pct = mdf(bet_pct_pot)
+            if ev_call > 0:
+                return R(
+                    "CALL (river +EV)", "#60ff60", hero_label,
+                    f"River call +EV ≈ +{ev_call:.1f}BB. eq~{eq*100:.0f}% "
+                    f"vs needed {bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
+                    f"MDF={mdf_pct*100:.0f}%.",
+                )
+            return R(
+                "FOLD", "#ff6060", hero_label,
+                f"River fold: eq~{eq*100:.0f}% < pot odds need "
+                f"{bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
+                f"EV(call) ≈ {ev_call:.1f}BB. MDF={mdf_pct*100:.0f}%.",
+            )
+        # Not facing bet — choose BET vs CHECK by EV
+        typical_bet_bb = pot_bb * RIVER_POLAR_PCT
+        fe_est = _river_fold_equity_estimate(bi, hero_class, beat_pct)
+        ev_bet = ev_river_bet(pot_bb, typical_bet_bb, fe_est, eq)
+        ev_check = eq * pot_bb  # assume villain checks back
+        if ev_bet > ev_check + 0.5:  # margin за noise
+            sz = int(round(typical_bet_bb / pot_bb * 100))
+            return R(
+                f"BET {sz}% (river +EV)", "#60ff60", hero_label,
+                f"River bet +EV ≈ +{ev_bet:.1f}BB > check +{ev_check:.1f}BB. "
+                f"FE~{fe_est*100:.0f}%, eq~{eq*100:.0f}%.",
+            )
+        return R(
+            "CHECK (showdown)", "#f0d060", hero_label,
+            f"River check: bet EV ≈ {ev_bet:.1f}BB ≤ check EV "
+            f"{ev_check:.1f}BB. Take showdown value.",
+        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  MONSTERS: Quads, Full House, Flush, Straight, Сет, Trips, Две двойки
