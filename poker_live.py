@@ -772,10 +772,13 @@ class LiveAdvisor(tk.Tk):
                  font=("Segoe UI", 11), pady=2).pack()
 
         # PREFLOP
-        pf = tk.Frame(self, bg="#1a2e20")
-        pf.pack(fill="x", padx=12, pady=4)
-        tk.Label(pf, text="PREFLOP", bg="#1a2e20", fg="#88aaff",
-                 font=("Segoe UI", 10, "bold"), padx=6).pack(anchor="w")
+        self.pf_frame = tk.Frame(self, bg="#1a2e20")
+        self.pf_frame.pack(fill="x", padx=12, pady=4)
+        pf = self.pf_frame
+        self.pf_header_lbl = tk.Label(
+            pf, text="PREFLOP", bg="#1a2e20", fg="#88aaff",
+            font=("Segoe UI", 10, "bold"), padx=6)
+        self.pf_header_lbl.pack(anchor="w")
         self.pf_action_var = tk.StringVar(value="Pick cards...")
         self.pf_action_lbl = tk.Label(pf, textvariable=self.pf_action_var, bg="#1a2e20",
                                       fg="#888", font=("Segoe UI", 22, "bold"),
@@ -827,16 +830,48 @@ class LiveAdvisor(tk.Tk):
                  font=("Segoe UI", 11, "bold"), pady=2).pack()
 
     # ── ТИ ИМАШ / ТЕ БИЕ цветова палитра ─────────────────────────────────────
-    # Прилага се на frame + двата label-а според beat_pct.
-    # None = неутрално (clear / preflop). Прагове 65 / 35 — emperично.
+    # Hysteresis: за да не премигва когато pct hover-ва около праг.
+    # Зелено-в: ≥68, зелено-out: <60 (до amber). Amber-out high: ≥68.
+    # Червено-в: ≤30, червено-out: >38 (до amber). Amber-out low: ≤30.
+    # Между bands-овете има overlap зона която НЕ сменя текущия band.
     def _apply_threat_colors(self, beat_pct):
+        # Determine new band with hysteresis спрямо `_last_color_band`
+        current = getattr(self, "_last_color_band", None)
         if beat_pct is None:
+            new_band = None
+        elif current == "green":
+            new_band = "green" if beat_pct >= 60 else (
+                "amber" if beat_pct > 38 else "red"
+            )
+        elif current == "red":
+            new_band = "red" if beat_pct <= 38 else (
+                "amber" if beat_pct < 60 else "green"
+            )
+        elif current == "amber":
+            if beat_pct >= 68:
+                new_band = "green"
+            elif beat_pct <= 30:
+                new_band = "red"
+            else:
+                new_band = "amber"
+        else:  # initial / None
+            if beat_pct >= 65:
+                new_band = "green"
+            elif beat_pct >= 35:
+                new_band = "amber"
+            else:
+                new_band = "red"
+        # Skip repaint ако bandът не се сменя
+        if new_band == current:
+            return
+        self._last_color_band = new_band
+        if new_band is None:
             frame_bg, have_fg, beat_fg = "#1a1a22", "#88ddff", "#ff9988"
-        elif beat_pct >= 65:
+        elif new_band == "green":
             frame_bg, have_fg, beat_fg = "#1a2a1a", "#88ff88", "#aaccaa"
-        elif beat_pct >= 35:
+        elif new_band == "amber":
             frame_bg, have_fg, beat_fg = "#2a261a", "#ffd866", "#ffaa66"
-        else:
+        else:  # red
             frame_bg, have_fg, beat_fg = "#2a1a1a", "#ffaaaa", "#ff7766"
         self.threats_frame.config(bg=frame_bg)
         self.threats_have_lbl.config(bg=frame_bg, fg=have_fg)
@@ -1870,6 +1905,10 @@ class LiveAdvisor(tk.Tk):
             self.texture_var.set("")
 
         # ── PREFLOP ──────────────────────────────────────────────────────────
+        # Когато сме postflop, dim-ваме preflop секцията (фокусът е на
+        # текущата улица) и спираме да log-ваме preflop advice — иначе
+        # изглежда сякаш съветваме два различни action-а едновременно.
+        is_postflop_active = len(board) >= 3 and len(hole) == 2
         if len(hole) == 2:
             facing_raise = w.facing_raise_preflop or (w.street == 'preflop' and w.facing_bet and call_bb > 1.5)
             pf = preflop_analyze(hole, hero_pos=pos, facing_raise=facing_raise)
@@ -1881,11 +1920,17 @@ class LiveAdvisor(tk.Tk):
                     action_text = f"[vs RAISE {call_bb:.1f}BB] {action_text}"
                 else:
                     action_text = f"[vs RAISE] {action_text}"
-            self.pf_action_var.set(action_text)
-            self.pf_reason_var.set(pf["reason"])
-            self.pf_action_lbl.config(fg=pf["color"])
-            # Strategy log: preflop advice
-            if self.strategy_logger and w.hand_id:
+            if is_postflop_active:
+                # Dim: малък сив текст, hand class само (без action banner)
+                self.pf_action_var.set(f"(preflop: {pf['action']})")
+                self.pf_reason_var.set("")
+                self.pf_action_lbl.config(fg="#666")
+            else:
+                self.pf_action_var.set(action_text)
+                self.pf_reason_var.set(pf["reason"])
+                self.pf_action_lbl.config(fg=pf["color"])
+            # Strategy log: preflop advice — само на preflop street
+            if (self.strategy_logger and w.hand_id and not is_postflop_active):
                 try:
                     bb_for_log = w.bb_size if w.bb_size > 0 else 0
                     stack_bb_pf = (w.hero_stack_chips / bb_for_log
