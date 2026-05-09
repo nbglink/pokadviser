@@ -24,8 +24,7 @@ debug_*.png
 *.tmp
 
 # Calibration is per-monitor — let users generate their own
-# (uncomment if you want to ship a default)
-# scanner_config.json
+scanner_config.json
 
 # Editor / OS
 .vscode/
