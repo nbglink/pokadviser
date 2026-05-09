@@ -283,6 +283,58 @@ def ev_river_bet(pot_bb, bet_bb, fold_equity, equity_when_called):
     return fe_value + call_value
 
 
+def _blocker_note(hole, board, hero_class):
+    """Return a short note ако hero има значими blocker-и срещу villain
+    nut combos. Целта е informational — потребителят да види, че ръката
+    му има blocker value (по-добре за bluff catch).
+
+    Examples:
+      - 3+ flush board + hero има Ace на тая боя → блокира nut flush
+      - 4-connected board + hero има high card на straight → блокира nut straight
+
+    Връща string ("блокираш nut flush", etc.) или празно.
+    """
+    from collections import Counter
+    if not board or len(board) < 3:
+        return ""
+    notes = []
+    # Flush blocker — Ace of board's dominant suit (3+ same-suit)
+    suit_cnt = Counter(c[1] for c in board)
+    if suit_cnt:
+        top_suit, top_count = suit_cnt.most_common(1)[0]
+        if top_count >= 3:
+            hero_suits = {c[1]: c[0] for c in hole}
+            if hero_suits.get(top_suit) == 'A':
+                notes.append("блокираш nut flush (имаш A♠/♥/♦/♣ от боята)")
+            elif hero_suits.get(top_suit) == 'K':
+                notes.append("блокираш high flush (имаш K от боята)")
+    # Straight blocker — high or low straight card on coordinated board
+    if hero_class not in ('straight', 'straight_flush'):
+        board_vals = sorted(set(RV[c[0]] for c in board))
+        if 12 in board_vals:
+            board_vals = [-1] + board_vals
+        # Check for 4-card connected window in board
+        for i in range(len(board_vals)):
+            for j in range(i + 1, len(board_vals) + 1):
+                w = board_vals[i:j]
+                if len(w) >= 4 and w[-1] - w[0] <= 4:
+                    # Find missing card values that would complete straight
+                    needed_high = w[-1] + 1  # nut completing card (high end)
+                    needed_low = w[0] - 1   # low end
+                    rev_rv = {v: k for k, v in RV.items()}
+                    hero_rvs = {RV[c[0]] for c in hole}
+                    if needed_high in hero_rvs and needed_high <= 12:
+                        rk = rev_rv.get(needed_high, '?')
+                        notes.append(f"блокираш high straight (имаш {rk})")
+                    elif needed_low in hero_rvs and needed_low >= 0:
+                        rk = rev_rv.get(needed_low, '?')
+                        notes.append(f"блокираш low straight (имаш {rk})")
+                    break
+            if notes and 'straight' in notes[-1]:
+                break
+    return "; ".join(notes) if notes else ""
+
+
 def _river_fold_equity_estimate(bi, hero_class, beat_pct):
     """Heuristic за P(villain folds) на river при типичен 75%-pot bet.
 
@@ -1550,7 +1602,7 @@ def spr_bucket(spr):
 # ─── Postflop анализ (v4 — с SPR) ─────────────────────────────────────────────
 def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=None,
                      stack_bb=None, pot_bb=None, num_opponents=1,
-                     call_bb=None):
+                     call_bb=None, is_3bet_pot=False):
     """Postflop decision engine.
 
     Args:
@@ -1749,10 +1801,25 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             sizing = "Sizing: 33-50% пот"
             default_bet_pct = FLOP_OTHER_PCT
 
+    # 3-bet pot adjustment: smaller cbet sizing (33% default), tighter
+    # commit thresholds. Engine'ът третира 3-bet pots като self-aware
+    # SPR-low scenarios.
+    threebet_note = ""
+    if is_3bet_pot and street_name in ('flop', 'turn'):
+        # Override cbet sizing to ~33% pot (Upswing Rule 8)
+        if default_bet_pct > 0.40:
+            default_bet_pct = 0.33
+            sizing = "Sizing: 25-33% пот (3-bet pot — малки sizing-и)"
+        threebet_note = "3-bet pot: tighter ranges, малък sizing, бърз commit"
+    # Blocker awareness: hero блокира ли nut combos?
+    blocker_note = _blocker_note(hole, board, hero_class)
+
     pn = f"  [{pa['note']}]" if pa.get('note') else ""
     sn = f"  [{spr_note}]" if spr_note else ""
     mn = f"  [{mw_note}]" if mw_note else ""
     ftn = f"  [{ft_note}]" if ft_note else ""
+    tbn = f"  [{threebet_note}]" if threebet_note else ""
+    bln = f"  [{blocker_note}]" if blocker_note else ""
 
     def _mw_adjust(action, color, hand_label):
         """При multiway смъкваме агресията за non-nut hands.
@@ -1812,13 +1879,15 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         a2, c2 = _mw_adjust(a, c, h)
         a3, c3 = _threat_adjust(a2, c2, h)
         return dict(
-            action=a3, color=c3, hand=h, reason=r + pn + sn + mn + ftn,
+            action=a3, color=c3, hand=h,
+            reason=r + pn + sn + mn + ftn + tbn + bln,
             sizing=sizing,
             hero_class=hero_class,
             hero_label=hero_label,
             threats=hero_threats,
             beat_pct=beat_pct,
             lose_pct=lose_pct,
+            is_3bet_pot=is_3bet_pot,
         )
 
     # Draw outs (0 on river) — виж OUTS_* константи най-горе
@@ -1851,52 +1920,85 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         return f"Equity ~{eq:.0f}% vs нужни {needed:.0f}%"
 
     # ═══════════════════════════════════════════════════════════════════════════
-    #  EV-DRIVEN RIVER OVERRIDE
+    #  EV-DRIVEN RIVER + TURN OVERRIDE
     # ═══════════════════════════════════════════════════════════════════════════
-    # На river няма future streets → EV математиката е чиста (без implied
-    # odds). За marginal made hands (high_card / pair) EV изчислението
-    # disambiguates better от rule-based heuristics.
-    # Силните ръце (sets+) минават през rule-based dispatch по-долу за
-    # specific phrasing; EV override фокусира върху bluff-catchers.
-    if (is_river and beat_pct is not None and pot_bb is not None
-            and pot_bb > 0 and hero_class in ('high_card', 'pair', 'two_pair')):
-        eq = beat_pct / 100.0
-        if facing_bet:
-            actual_bet_bb = call_bb if (call_bb and call_bb > 0) else (
-                pot_bb * RIVER_POLAR_PCT)
-            ev_call = ev_river_call(pot_bb, actual_bet_bb, eq)
-            bet_pct_pot = actual_bet_bb / pot_bb if pot_bb else 1.0
-            mdf_pct = mdf(bet_pct_pot)
-            if ev_call > 0:
+    # River: EV математиката е чиста (no future streets, no draws).
+    # Turn: имаме ОЩЕ една улица — добавяме draw equity bonus към direct
+    # equity. За marginal made hands (high_card / pair / two_pair) EV
+    # override-ва rule-based heuristics. Силните ръце (sets+) минават
+    # през rule-based dispatch по-долу.
+    if (beat_pct is not None and pot_bb is not None and pot_bb > 0
+            and hero_class in ('high_card', 'pair', 'two_pair')):
+        eq_direct = beat_pct / 100.0
+        if is_river:
+            eff_eq = eq_direct
+            street_label = "River"
+            sizing_pct = RIVER_POLAR_PCT
+        elif street_name == 'turn':
+            # На turn добавяме draw equity (river ще донесе outs).
+            # outs/47 е приблизителна chance да подобрим до бияща ръка.
+            draw_eq_bonus = 0.0
+            if oesd:
+                draw_eq_bonus += OUTS_OESD / 47.0 * 0.6  # not all hits win
+            elif gutshot:
+                draw_eq_bonus += OUTS_GUTSHOT / 47.0 * 0.5
+            if fd and not has_made_flush:
+                draw_eq_bonus += OUTS_FD / 47.0 * 0.7
+            elif bfd and not fd:
+                draw_eq_bonus += OUTS_BFD / 47.0 * 0.3
+            eff_eq = min(0.95, eq_direct + draw_eq_bonus)
+            street_label = "Turn"
+            sizing_pct = TURN_WET_PCT if not bi['is_dry'] else TURN_DRY_PCT
+        else:
+            eff_eq = None
+            street_label = ""
+            sizing_pct = default_bet_pct
+
+        if eff_eq is not None:
+            if facing_bet:
+                actual_bet_bb = call_bb if (call_bb and call_bb > 0) else (
+                    pot_bb * sizing_pct)
+                ev_call = ev_river_call(pot_bb, actual_bet_bb, eff_eq)
+                bet_pct_pot = actual_bet_bb / pot_bb if pot_bb else 1.0
+                mdf_pct = mdf(bet_pct_pot)
+                draw_str = ""
+                if street_label == "Turn" and (eff_eq - eq_direct) > 0.01:
+                    draw_str = (f" (incl. draw +{(eff_eq-eq_direct)*100:.0f}%)")
+                if ev_call > 0:
+                    return R(
+                        f"CALL ({street_label.lower()} +EV)", "#60ff60",
+                        hero_label,
+                        f"{street_label} call +EV ≈ +{ev_call:.1f}BB. "
+                        f"eff_eq~{eff_eq*100:.0f}%{draw_str} "
+                        f"vs need {bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
+                        f"MDF={mdf_pct*100:.0f}%.",
+                    )
                 return R(
-                    "CALL (river +EV)", "#60ff60", hero_label,
-                    f"River call +EV ≈ +{ev_call:.1f}BB. eq~{eq*100:.0f}% "
-                    f"vs needed {bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
-                    f"MDF={mdf_pct*100:.0f}%.",
+                    "FOLD", "#ff6060", hero_label,
+                    f"{street_label} fold: eff_eq~{eff_eq*100:.0f}%{draw_str} "
+                    f"< need {bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
+                    f"EV(call)≈{ev_call:.1f}BB. MDF={mdf_pct*100:.0f}%.",
+                )
+            # Not facing bet — choose BET vs CHECK by EV
+            typical_bet_bb = pot_bb * sizing_pct
+            fe_est = _river_fold_equity_estimate(bi, hero_class, beat_pct)
+            ev_bet = ev_river_bet(pot_bb, typical_bet_bb, fe_est, eff_eq)
+            ev_check = eff_eq * pot_bb  # rough — villain may bet later
+            if ev_bet > ev_check + 0.5:
+                sz = int(round(typical_bet_bb / pot_bb * 100))
+                return R(
+                    f"BET {sz}% ({street_label.lower()} +EV)", "#60ff60",
+                    hero_label,
+                    f"{street_label} bet +EV ≈ +{ev_bet:.1f}BB > "
+                    f"check +{ev_check:.1f}BB. FE~{fe_est*100:.0f}%, "
+                    f"eff_eq~{eff_eq*100:.0f}%.",
                 )
             return R(
-                "FOLD", "#ff6060", hero_label,
-                f"River fold: eq~{eq*100:.0f}% < pot odds need "
-                f"{bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
-                f"EV(call) ≈ {ev_call:.1f}BB. MDF={mdf_pct*100:.0f}%.",
+                "CHECK (showdown)" if is_river else "CHECK",
+                "#f0d060", hero_label,
+                f"{street_label} check: bet EV ≈ {ev_bet:.1f}BB ≤ check "
+                f"EV {ev_check:.1f}BB.",
             )
-        # Not facing bet — choose BET vs CHECK by EV
-        typical_bet_bb = pot_bb * RIVER_POLAR_PCT
-        fe_est = _river_fold_equity_estimate(bi, hero_class, beat_pct)
-        ev_bet = ev_river_bet(pot_bb, typical_bet_bb, fe_est, eq)
-        ev_check = eq * pot_bb  # assume villain checks back
-        if ev_bet > ev_check + 0.5:  # margin за noise
-            sz = int(round(typical_bet_bb / pot_bb * 100))
-            return R(
-                f"BET {sz}% (river +EV)", "#60ff60", hero_label,
-                f"River bet +EV ≈ +{ev_bet:.1f}BB > check +{ev_check:.1f}BB. "
-                f"FE~{fe_est*100:.0f}%, eq~{eq*100:.0f}%.",
-            )
-        return R(
-            "CHECK (showdown)", "#f0d060", hero_label,
-            f"River check: bet EV ≈ {ev_bet:.1f}BB ≤ check EV "
-            f"{ev_check:.1f}BB. Take showdown value.",
-        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  MONSTERS: Quads, Full House, Flush, Straight, Сет, Trips, Две двойки
