@@ -1,5 +1,6 @@
 import unittest
 
+import poker_live
 from poker_live import (
     LiveAdvisor,
     LogWatcher,
@@ -96,6 +97,28 @@ class LiveParserTests(unittest.TestCase):
         )
         self.assertEqual(action, "RAISE")
         self.assertEqual(color, "#00e676")
+
+    def test_live_advisor_ui_build_and_compact_toggle(self):
+        old_scanner = poker_live.CardScanner
+        old_scanner_err = poker_live._SCANNER_IMPORT_ERR
+        poker_live.CardScanner = None
+        poker_live._SCANNER_IMPORT_ERR = "test-disabled"
+        app = None
+        try:
+            try:
+                app = LiveAdvisor()
+            except poker_live.tk.TclError as exc:
+                self.skipTest(f"Tk unavailable: {exc}")
+            app.update_idletasks()
+            app._toggle_compact()
+            app.update_idletasks()
+            app._toggle_compact()
+            app.update_idletasks()
+        finally:
+            if app is not None:
+                app.destroy()
+            poker_live.CardScanner = old_scanner
+            poker_live._SCANNER_IMPORT_ERR = old_scanner_err
 
     def test_dealer_candidate_prefers_seat_fit_over_raw_visual_score(self):
         det = {

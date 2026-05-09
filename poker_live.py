@@ -788,7 +788,8 @@ class LiveAdvisor(tk.Tk):
         self.focus_detail_var = tk.StringVar(value="")
         tk.Label(self.focus_frame, textvariable=self.focus_detail_var,
                  bg="#07130d", fg="#c8d8c8", font=("Segoe UI", 11),
-                 wraplength=660, padx=8, pady=(0, 6), justify="center").pack(fill="x")
+                 wraplength=660, padx=8, pady=2, justify="center").pack(
+                     fill="x", pady=(0, 6))
 
         # Quick card picker
         self.picker_frame = tk.Frame(self, bg=self.BG2, pady=6)
