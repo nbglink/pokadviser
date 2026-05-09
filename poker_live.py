@@ -669,6 +669,10 @@ class LiveAdvisor(tk.Tk):
         # Track previous-street action for probe-bet detection
         self._prev_street_pot_chips = 0
         self._prev_street_name = None
+        # Manual D-button pin (None or (x_ratio, y_ratio)). Cleared on
+        # new hand. When set, position is locked from manual click.
+        self._manual_button_pos = None
+        self._manual_button_hand_id = None
         if _LOG:
             _LOG.info("[INIT] LiveAdvisor started; scanner=%s",
                       "OK" if self.scanner and self.scanner.available
@@ -759,6 +763,15 @@ class LiveAdvisor(tk.Tk):
             command=self._scan_dealer_button, state=cb_state,
         )
         self.btn_scan_btn.pack(side="left", padx=2)
+
+        # Pin D: ръчно посочваш къде е D бутонът → override + correction log
+        self.btn_pin_btn = tk.Button(
+            self.sbar, text="Pin D", font=("Segoe UI", 9, "bold"),
+            bg="#5a3a2a", fg="white", activebackground="#7a4a3a",
+            relief="flat", bd=0, padx=6, pady=2,
+            command=self._pick_button_position, state=cb_state,
+        )
+        self.btn_pin_btn.pack(side="left", padx=2)
 
         # OCR status (read-only label: напр. "EasyOCR GPU ✓")
         self.ocr_status_var = tk.StringVar(value="")
@@ -1928,6 +1941,188 @@ class LiveAdvisor(tk.Tk):
         return {"pos": pos, "slot": slot, "angle": ang,
                 "err": err, "det": det}
 
+    def _pick_button_position(self):
+        """Опако ръчно посочване на D бутона. Отваря screenshot на PS
+        прозореца, hero кликва там, където реално е D. Override-ва
+        auto-detection за текущата ръка и записва ground-truth correction
+        в logs/button_corrections.jsonl за бъдещо tuning на detector-а.
+        """
+        if not self.scanner or not self.scanner.available:
+            self.status_var.set("Scanner недостъпен")
+            return
+        win = self.scanner.find_ps_window()
+        if win is None:
+            self.status_var.set("PS прозорец не намерен")
+            return
+        try:
+            img = self.scanner.capture_window(win)
+        except Exception as e:
+            self.status_var.set(f"Capture error: {e}")
+            return
+        if img is None:
+            self.status_var.set("Capture failed")
+            return
+        rect = self.scanner.window_rect(win)
+        if rect is None:
+            return
+        _, _, W, H = rect
+
+        # Run auto-detect ONCE so we capture ground-truth comparison
+        auto_det = None
+        try:
+            auto_det = self.scanner.detect_dealer_button(win)
+        except Exception:
+            pass
+
+        # Build click-to-pick dialog
+        dlg = tk.Toplevel(self)
+        dlg.title("Pin D button — кликни КЪДЕТО Е D БУТОНЪТ")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.configure(bg="#1a1a1a")
+
+        # Scale image down ако е твърде голям за screen
+        max_w, max_h = 1600, 900
+        scale = min(max_w / W, max_h / H, 1.0)
+        disp_w = max(100, int(W * scale))
+        disp_h = max(100, int(H * scale))
+        try:
+            from PIL import ImageTk
+            disp_img = img.resize((disp_w, disp_h)) if scale < 1.0 else img
+            photo = ImageTk.PhotoImage(disp_img)
+        except Exception as e:
+            self.status_var.set(f"Image render error: {e}")
+            dlg.destroy()
+            return
+
+        info = tk.Label(
+            dlg, bg="#1a1a1a", fg="#ffd866",
+            font=("Segoe UI", 11, "bold"),
+            text="Кликни ВЪРХУ D БУТОНА в screenshot-а  ·  Esc = откажи",
+            pady=6,
+        )
+        info.pack(fill="x")
+
+        canvas = tk.Canvas(dlg, width=disp_w, height=disp_h,
+                           bg="#000000", highlightthickness=0)
+        canvas.pack()
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.image_ref = photo  # prevent garbage collection
+
+        # Show auto-detected D as a yellow circle on the canvas (if any)
+        if auto_det:
+            ax = float(auto_det.get("x_ratio", 0)) * disp_w
+            ay = float(auto_det.get("y_ratio", 0)) * disp_h
+            ar = max(8, int(auto_det.get("radius_px", 12) * scale))
+            canvas.create_oval(ax - ar, ay - ar, ax + ar, ay + ar,
+                               outline="#ffd866", width=2)
+            canvas.create_text(
+                ax + ar + 4, ay,
+                text=f"auto (conf={auto_det.get('confidence', 0):.2f})",
+                fill="#ffd866", anchor="w",
+                font=("Segoe UI", 9))
+
+        def on_click(event):
+            x_ratio = max(0.0, min(1.0, event.x / disp_w))
+            y_ratio = max(0.0, min(1.0, event.y / disp_h))
+            self._save_button_correction(x_ratio, y_ratio, rect, auto_det)
+            self._apply_manual_button(x_ratio, y_ratio)
+            dlg.destroy()
+
+        def on_cancel(*_):
+            dlg.destroy()
+
+        canvas.bind("<Button-1>", on_click)
+        dlg.bind("<Escape>", on_cancel)
+        dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+        # Center on screen
+        dlg.update_idletasks()
+        sw = dlg.winfo_screenwidth()
+        sh = dlg.winfo_screenheight()
+        x = (sw - disp_w) // 2
+        y = (sh - disp_h) // 2 - 40
+        dlg.geometry(f"+{max(0,x)}+{max(0,y)}")
+
+    def _save_button_correction(self, x_ratio, y_ratio, rect, auto_det):
+        """Запиши ground-truth correction в logs/button_corrections.jsonl.
+
+        Записа съдържа:
+          - timestamp + hand_id
+          - window size
+          - clicked (x,y) ratio
+          - auto-detection result + всички passed/rejected candidates
+        Файлът после може да се ползва за анализ на failure modes и
+        tuning на guards в detect_dealer_button.
+        """
+        try:
+            import json
+            import time
+            from pathlib import Path
+            log_dir = Path(__file__).resolve().parent / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "button_corrections.jsonl"
+            entry = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "hand_id": self.watcher.hand_id,
+                "num_players": (self.watcher.num_players
+                                or self.watcher._view_num_players),
+                "window_size": [int(rect[2]), int(rect[3])],
+                "manual_xy_ratio": [round(x_ratio, 4), round(y_ratio, 4)],
+            }
+            if auto_det:
+                # Distance between auto-detect and manual click — measures
+                # how badly the detector missed.
+                ax = float(auto_det.get("x_ratio", 0))
+                ay = float(auto_det.get("y_ratio", 0))
+                dist = ((ax - x_ratio) ** 2 + (ay - y_ratio) ** 2) ** 0.5
+                entry["auto_xy_ratio"] = [round(ax, 4), round(ay, 4)]
+                entry["auto_confidence"] = round(
+                    float(auto_det.get("confidence", 0)), 3)
+                entry["auto_to_manual_dist_ratio"] = round(dist, 4)
+                # Compact candidates list (top 5 by score)
+                cands = (auto_det.get("candidates") or [])[:5]
+                entry["passed_candidates"] = [
+                    {k: (round(v, 3) if isinstance(v, float) else v)
+                     for k, v in c.items()
+                     if k in ("x_ratio", "y_ratio", "r", "brightness",
+                              "red_ratio", "ring_sat", "ring_std",
+                              "v_contrast", "score")}
+                    for c in cands
+                ]
+                entry["rejected_count"] = auto_det.get("rejected_count", 0)
+            else:
+                entry["auto_xy_ratio"] = None
+                entry["auto_confidence"] = None
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            if _LOG:
+                _LOG.info(
+                    "[BTN] manual pin recorded hand=%s xy=(%.3f,%.3f) %s",
+                    self.watcher.hand_id or "-", x_ratio, y_ratio,
+                    f"auto-dist={entry.get('auto_to_manual_dist_ratio')}"
+                    if auto_det else "no-auto",
+                )
+        except Exception as e:
+            if _LOG:
+                _LOG.warning("[BTN] failed to save correction: %s", e)
+
+    def _apply_manual_button(self, x_ratio, y_ratio):
+        """Override watcher position from manual D pin."""
+        self._manual_button_pos = (x_ratio, y_ratio)
+        self._manual_button_hand_id = self.watcher.hand_id
+        n = (self.watcher.num_players
+             or self.watcher._view_num_players or 6)
+        pos, slot, ang, err = position_from_dealer_ratio(
+            x_ratio, y_ratio, n)
+        if pos != '?':
+            self.watcher._set_position(pos, "manual-pin", locked=True)
+            self.watcher.num_players = n
+            self.status_var.set(
+                f"D pinned → {pos} (slot {slot}, ang={ang:.0f}°)")
+        else:
+            self.status_var.set(
+                f"D pinned (no clear seat: ang={ang:.0f}°, err={err:.0f}°)")
+
     def _debug_scan(self):
         """Запазва screenshot + crops + scan result за troubleshooting."""
         if not self.scanner or not self.scanner.available:
@@ -2071,6 +2266,9 @@ class LiveAdvisor(tk.Tk):
                         pass
                 self._reset_picker()  # auto-clear on new hand
                 self._scan_attempt = 0  # reset retry counter за новата ръка
+                # Clear manual button pin от предишна ръка
+                self._manual_button_pos = None
+                self._manual_button_hand_id = None
                 # Clear pending scan UI от предишна ръка
                 if self._pending_scan:
                     self._confirm_scan_reject()
