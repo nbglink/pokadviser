@@ -14,8 +14,6 @@ Poker SRP OOP Strategy Tool — Preflop + Postflop (v4 — Upswing Pro)
   + Стандартни 6-max cash preflop рейнджове.
 """
 
-import tkinter as tk
-
 # ─── Константи ────────────────────────────────────────────────────────────────
 RANKS = ['A','K','Q','J','T','9','8','7','6','5','4','3','2']
 SUITS = ['s','h','d','c']
@@ -1231,7 +1229,10 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     is_multiway = num_opponents >= 2
     mw_note = ""
     if is_multiway:
-        mw_note = f"Multiway ({num_opponents} опонента): TP = 1 улица, draws downgrade, без bluff c-bet."
+        mw_note = (
+            f"Multiway ({num_opponents} опонента): tight is right; "
+            "value-heavy, малки sizing-и, само high-equity bluffs."
+        )
 
     # Draw detection — no draws on river
     if is_river:
@@ -1302,16 +1303,25 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     mn = f"  [{mw_note}]" if mw_note else ""
 
     def _mw_adjust(action, color, hand_label):
-        """При multiway смъкваме агресията за не-монстри:
-        RAISE→CALL, BET→CHECK, освен при FLUSH/STRAIGHT/Сет/2pair."""
+        """При multiway смъкваме агресията за non-nut hands.
+
+        Теорията за multiway pots: по-малко range betting, повече value-heavy
+        линии, high-equity draws като изключение.
+        """
         if not is_multiway:
             return action, color
-        strong_labels = ('FLUSH', 'STRAIGHT', 'Сет', 'Две двойки')
+        strong_labels = (
+            'QUADS', 'Boat', 'Фул', 'FULL HOUSE',
+            'FLUSH', 'STRAIGHT', 'Сет', 'Две двойки',
+        )
+        semi_bluff_labels = ('Комбо дро', 'Nut FD')
         if any(s in hand_label for s in strong_labels):
             return action, color  # монстрите запазват агресията
+        if any(s in hand_label for s in semi_bluff_labels) and not facing_bet:
+            return action, color  # high-equity bluffs са допустими multiway
         a_upper = action.upper()
-        if 'RAISE' in a_upper and 'CALL' not in a_upper:
-            return action.replace('RAISE', 'CALL').replace('ALL-IN', 'CALL'), "#f0d060"
+        if 'RAISE' in a_upper or 'ALL-IN' in a_upper:
+            return "CALL (multiway)", "#f0d060"
         if a_upper.startswith('BET') and 'CHECK' not in a_upper:
             return "CHECK (multiway)", "#f0d060"
         return action, color
@@ -1876,263 +1886,5 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     return R("CHECK / FOLD", "#ff9060", "Air", "Нищо — чек, fold.")
 
 
-# ─── GUI ──────────────────────────────────────────────────────────────────────
-class App(tk.Tk):
-    BG = "#1b3a2a"; BG2 = "#0f2419"; GOLD = "#f0d060"
-    CARD_BG = "#faf8f0"; SEL_HOLE = "#ffe040"; SEL_FLOP = "#60d0ff"
-    POS_BG = "#2a5a3a"; POS_SEL = "#f0d060"; POS_FG_SEL = "#1b3a2a"
-
-    def __init__(self):
-        super().__init__()
-        self.title("♠ Poker Decision Tool")
-        self.configure(bg=self.BG)
-        self.resizable(False, False)
-        self.hole = []; self.flop = []
-        self.card_btns = {}
-        self.facing_bet = tk.BooleanVar(value=False)
-        self.facing_raise = tk.BooleanVar(value=False)
-        self.hero_pos = tk.StringVar(value="")
-        self.villain_pos = tk.StringVar(value="")
-        self.hero_btns = {}; self.villain_btns = {}
-        self._build()
-        self._update_all()
-
-    def _build(self):
-        # ── Хедър ──
-        hdr = tk.Frame(self, bg=self.BG2, pady=4)
-        hdr.pack(fill="x")
-        tk.Label(hdr, text="♠ Poker Decision Tool ♠", bg=self.BG2, fg=self.GOLD,
-                 font=("Segoe UI", 14, "bold")).pack()
-
-        # ── Позиции (опционално) ──
-        pos_frame = tk.Frame(self, bg=self.BG, pady=2)
-        pos_frame.pack(fill="x", padx=16)
-        tk.Label(pos_frame, text="Позиции (опционално):", bg=self.BG, fg="#77aa77",
-                 font=("Segoe UI", 8)).pack(anchor="w")
-
-        row1 = tk.Frame(pos_frame, bg=self.BG)
-        row1.pack(fill="x", pady=1)
-        tk.Label(row1, text="Ти:", bg=self.BG, fg="#ccc", font=("Segoe UI", 9), width=10, anchor="e").pack(side="left")
-        for p in ['UTG','MP','CO','BTN','SB','BB']:
-            btn = tk.Button(row1, text=p, width=4, font=("Segoe UI", 8, "bold"),
-                            bg=self.POS_BG, fg="white", relief="flat", cursor="hand2",
-                            command=lambda x=p: self._set_hero(x))
-            btn.pack(side="left", padx=1)
-            self.hero_btns[p] = btn
-
-        row2 = tk.Frame(pos_frame, bg=self.BG)
-        row2.pack(fill="x", pady=1)
-        tk.Label(row2, text="Опонент:", bg=self.BG, fg="#ccc", font=("Segoe UI", 9), width=10, anchor="e").pack(side="left")
-        for p in ['UTG','MP','CO','BTN','SB','BB']:
-            btn = tk.Button(row2, text=p, width=4, font=("Segoe UI", 8, "bold"),
-                            bg=self.POS_BG, fg="white", relief="flat", cursor="hand2",
-                            command=lambda x=p: self._set_villain(x))
-            btn.pack(side="left", padx=1)
-            self.villain_btns[p] = btn
-
-        # ── Статус ──
-        self.status_var = tk.StringVar()
-        tk.Label(self, textvariable=self.status_var, bg=self.BG, fg="white",
-                 font=("Segoe UI", 10, "bold"), pady=2).pack()
-
-        # ── Избрани карти ──
-        sel = tk.Frame(self, bg=self.BG, pady=2)
-        sel.pack()
-        tk.Label(sel, text="Ръка:", bg=self.BG, fg="#aaa", font=("Segoe UI", 9)).grid(row=0, column=0, padx=2)
-        self.hole_labels = []
-        for i in range(2):
-            lbl = tk.Label(sel, text=" ? ", bg="#333", fg="white",
-                           font=("Segoe UI", 13, "bold"), width=4, relief="groove")
-            lbl.grid(row=0, column=i+1, padx=2)
-            self.hole_labels.append(lbl)
-        tk.Label(sel, text="  Флоп:", bg=self.BG, fg="#aaa", font=("Segoe UI", 9)).grid(row=0, column=3, padx=2)
-        self.flop_labels = []
-        for i in range(3):
-            lbl = tk.Label(sel, text=" ? ", bg="#333", fg="white",
-                           font=("Segoe UI", 13, "bold"), width=4, relief="groove")
-            lbl.grid(row=0, column=i+4, padx=2)
-            self.flop_labels.append(lbl)
-
-        # ── Карти grid ──
-        cf = tk.Frame(self, bg=self.BG, pady=4)
-        cf.pack()
-        for si, suit in enumerate(SUITS):
-            for ri, rank in enumerate(RANKS):
-                card = (rank, suit)
-                txt = f"{rank}{SYM[suit]}"
-                btn = tk.Button(cf, text=txt, width=4, height=1,
-                                font=("Segoe UI", 10, "bold"),
-                                bg=self.CARD_BG, fg=SCLR[suit],
-                                relief="raised", bd=1, cursor="hand2",
-                                command=lambda c=card: self._click(c))
-                btn.grid(row=si, column=ri, padx=1, pady=1)
-                self.card_btns[card] = btn
-
-        # ── Контроли ──
-        ctrl = tk.Frame(self, bg=self.BG, pady=2)
-        ctrl.pack()
-        tk.Checkbutton(ctrl, text="Facing Raise (preflop)",
-                       variable=self.facing_raise, bg=self.BG, fg="#aaddff",
-                       selectcolor="#2d6e44", font=("Segoe UI", 9),
-                       activebackground=self.BG, command=self._update_all).pack(side="left", padx=6)
-        tk.Checkbutton(ctrl, text="Facing Bet (postflop)",
-                       variable=self.facing_bet, bg=self.BG, fg=self.GOLD,
-                       selectcolor="#2d6e44", font=("Segoe UI", 9),
-                       activebackground=self.BG, command=self._update_all).pack(side="left", padx=6)
-        tk.Button(ctrl, text="ИЗЧИСТИ", command=self._reset,
-                  bg="#884040", fg="white", font=("Segoe UI", 9, "bold"),
-                  relief="flat", padx=10, cursor="hand2").pack(side="left", padx=6)
-
-        # ── Борд текстура ──
-        self.texture_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.texture_var, bg=self.BG, fg="#88ccaa",
-                 font=("Segoe UI", 9), pady=1).pack()
-
-        # ── PREFLOP резултат ──
-        pf = tk.Frame(self, bg="#1a2e20", bd=0)
-        pf.pack(fill="x", padx=14, pady=2)
-        tk.Label(pf, text="PREFLOP", bg="#1a2e20", fg="#88aaff", font=("Segoe UI", 8, "bold"),
-                 anchor="w", padx=8).pack(anchor="w")
-        self.pf_action_var = tk.StringVar(value="")
-        self.pf_reason_var = tk.StringVar(value="")
-        self.pf_action_lbl = tk.Label(pf, textvariable=self.pf_action_var, bg="#1a2e20",
-                                      fg=self.GOLD, font=("Segoe UI", 16, "bold"),
-                                      wraplength=580, pady=4)
-        self.pf_action_lbl.pack()
-        tk.Label(pf, textvariable=self.pf_reason_var, bg="#1a2e20", fg="#ccc",
-                 font=("Segoe UI", 9), wraplength=580, pady=2, justify="center").pack()
-
-        # ── POSTFLOP резултат ──
-        res = tk.Frame(self, bg=self.BG2, bd=0)
-        res.pack(fill="x", padx=14, pady=2)
-        tk.Label(res, text="POSTFLOP", bg=self.BG2, fg="#ffaa44", font=("Segoe UI", 8, "bold"),
-                 anchor="w", padx=8).pack(anchor="w")
-        self.action_var = tk.StringVar(value="")
-        self.hand_var = tk.StringVar(value="")
-        self.reason_var = tk.StringVar(value="")
-        self.sizing_var = tk.StringVar(value="")
-
-        self.action_lbl = tk.Label(res, textvariable=self.action_var, bg=self.BG2,
-                                   fg=self.GOLD, font=("Segoe UI", 16, "bold"),
-                                   wraplength=580, pady=4)
-        self.action_lbl.pack()
-        tk.Label(res, textvariable=self.hand_var, bg=self.BG2, fg="#aaddaa",
-                 font=("Segoe UI", 10), pady=1).pack()
-        tk.Label(res, textvariable=self.reason_var, bg=self.BG2, fg="#ddd",
-                 font=("Segoe UI", 9), wraplength=580, pady=2, justify="center").pack()
-        tk.Label(res, textvariable=self.sizing_var, bg=self.BG2, fg="#ffcc66",
-                 font=("Segoe UI", 9, "bold"), pady=2).pack()
-
-    # ── Position toggles ──
-    def _set_hero(self, p):
-        self.hero_pos.set("" if self.hero_pos.get() == p else p)
-        cur = self.hero_pos.get()
-        for k, b in self.hero_btns.items():
-            b.config(bg=self.POS_SEL if k == cur else self.POS_BG,
-                     fg=self.POS_FG_SEL if k == cur else "white")
-        self._update_all()
-
-    def _set_villain(self, p):
-        self.villain_pos.set("" if self.villain_pos.get() == p else p)
-        cur = self.villain_pos.get()
-        for k, b in self.villain_btns.items():
-            b.config(bg=self.POS_SEL if k == cur else self.POS_BG,
-                     fg=self.POS_FG_SEL if k == cur else "white")
-        self._update_all()
-
-    # ── Card click ──
-    def _click(self, card):
-        if card in self.hole:
-            self.hole.remove(card)
-            self.card_btns[card].config(bg=self.CARD_BG, relief="raised")
-        elif card in self.flop:
-            self.flop.remove(card)
-            self.card_btns[card].config(bg=self.CARD_BG, relief="raised")
-        else:
-            if len(self.hole) < 2:
-                self.hole.append(card)
-                self.card_btns[card].config(bg=self.SEL_HOLE, relief="sunken")
-            elif len(self.flop) < 3:
-                self.flop.append(card)
-                self.card_btns[card].config(bg=self.SEL_FLOP, relief="sunken")
-        self._update_all()
-
-    # ── Update everything ──
-    def _update_all(self):
-        # Status
-        if len(self.hole) < 2:
-            n = 2 - len(self.hole)
-            self.status_var.set(f"Избери {n} карт{'а' if n==1 else 'и'} за РЪКАТА")
-        elif len(self.flop) < 3:
-            n = 3 - len(self.flop)
-            self.status_var.set(f"Избери {n} карт{'а' if n==1 else 'и'} за ФЛОПА (или виж preflop съвета)")
-        else:
-            self.status_var.set("Готово!")
-
-        # Selected card labels
-        for i, lbl in enumerate(self.hole_labels):
-            if i < len(self.hole):
-                r, s = self.hole[i]
-                lbl.config(text=f"{r}{SYM[s]}", fg=SCLR[s], bg=self.SEL_HOLE)
-            else:
-                lbl.config(text=" ? ", fg="white", bg="#333")
-        for i, lbl in enumerate(self.flop_labels):
-            if i < len(self.flop):
-                r, s = self.flop[i]
-                lbl.config(text=f"{r}{SYM[s]}", fg=SCLR[s], bg=self.SEL_FLOP)
-            else:
-                lbl.config(text=" ? ", fg="white", bg="#333")
-
-        # Board texture
-        if len(self.flop) == 3:
-            self.texture_var.set("Борд: " + " · ".join(texture_tags(board_info(self.flop))))
-        else:
-            self.texture_var.set("")
-
-        # ── PREFLOP analysis ──
-        if len(self.hole) == 2:
-            hp = self.hero_pos.get() or None
-            vp = self.villain_pos.get() or None
-            fr = self.facing_raise.get()
-            pf = preflop_analyze(self.hole, hp, fr, vp)
-            self.pf_action_var.set(pf["action"])
-            self.pf_reason_var.set(pf["reason"])
-            self.pf_action_lbl.config(fg=pf["color"])
-        else:
-            self.pf_action_var.set("")
-            self.pf_reason_var.set("Избери 2 карти за preflop съвет")
-            self.pf_action_lbl.config(fg="#888")
-
-        # ── POSTFLOP analysis ──
-        if len(self.hole) == 2 and len(self.flop) == 3:
-            hp = self.hero_pos.get() or None
-            vp = self.villain_pos.get() or None
-            r = postflop_analyze(self.hole, self.flop, self.facing_bet.get(), hp, vp)
-            self.action_var.set(r["action"])
-            self.hand_var.set(f"Ръка: {r['hand']}")
-            self.reason_var.set(r["reason"])
-            self.sizing_var.set(r.get("sizing", ""))
-            self.action_lbl.config(fg=r["color"])
-        else:
-            self.action_var.set("")
-            self.hand_var.set("")
-            self.reason_var.set("Добави 3 карти за флоп" if len(self.hole) == 2 else "")
-            self.sizing_var.set("")
-            self.action_lbl.config(fg="#888")
-
-    def _reset(self):
-        self.hole.clear(); self.flop.clear()
-        self.facing_bet.set(False); self.facing_raise.set(False)
-        self.hero_pos.set(""); self.villain_pos.set("")
-        for b in self.card_btns.values():
-            b.config(bg=self.CARD_BG, relief="raised")
-        for b in self.hero_btns.values():
-            b.config(bg=self.POS_BG, fg="white")
-        for b in self.villain_btns.values():
-            b.config(bg=self.POS_BG, fg="white")
-        self._update_all()
-
-
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    print("poker_oop_tool loaded. Run poker_live.py for the live advisor UI.")

@@ -142,6 +142,47 @@ def position_from_dealer_ratio(x_ratio, y_ratio, num_players,
     return (pos_name(hero_offset, num_players), slot, angle, err)
 
 
+def choose_dealer_candidate(det, num_players):
+    """Pick D-button candidate using visual score plus seat-angle fit.
+
+    `poker_scanner.detect_dealer_button()` scores only visual evidence
+    (white ring + red center). Here we also know table geometry, so prefer
+    candidates that sit close to one of the visual seat slots.
+    """
+    if not det:
+        return None
+    cands = det.get("candidates") or [det]
+    best = None
+    for cand in cands:
+        try:
+            x = float(cand["x_ratio"])
+            y = float(cand["y_ratio"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        pos, slot, ang, err = position_from_dealer_ratio(x, y, num_players)
+        visual = float(cand.get("score", cand.get("confidence", 0.0)) or 0.0)
+        if pos == "?":
+            angle_fit = 0.0
+        else:
+            angle_fit = max(0.0, min(1.0, 1.0 - (float(err) / 30.0)))
+        combined = 0.55 * visual + 0.45 * angle_fit
+        enriched = {
+            **cand,
+            "pos": pos,
+            "slot": slot,
+            "angle": ang,
+            "err": err,
+            "radius_px": cand.get("radius_px", cand.get("r")),
+            "confidence": float(cand.get("confidence", cand.get("score", 0.0)) or 0.0),
+            "visual_score": visual,
+            "angle_fit": angle_fit,
+            "combined_score": combined,
+        }
+        if best is None or enriched["combined_score"] > best["combined_score"]:
+            best = enriched
+    return best
+
+
 def decode_log_card(s):
     s = s.strip()
     if not s:
@@ -178,6 +219,7 @@ class LogWatcher:
         self.board = []
         self.occupied_seats = []
         self.hero_position = None
+        self.position_source = None
         self.num_players = 0
         self.new_hand = False
         self.changed = False
@@ -219,6 +261,13 @@ class LogWatcher:
             self.log_file = logs[0]
             self.last_pos = os.path.getsize(self.log_file)
 
+    def _set_position(self, pos, source, locked=False):
+        """Set hero position and remember how reliable the source was."""
+        self.hero_position = pos
+        self.position_source = source
+        if locked:
+            self._position_locked = True
+
     def _calc_position_from_msg0020(self, count=None):
         """Calculate hero position from action counts (HEURISTIC fallback).
 
@@ -236,7 +285,7 @@ class LogWatcher:
         k_view = len(self._preflop_action_seats)
         k = max(k_msg, k_view)
         offset = (3 + k) % n
-        self.hero_position = pos_name(offset, n)
+        self._set_position(pos_name(offset, n), f"fallback-count:{k}", locked=False)
         self.num_players = n
         # NOTE: no _position_locked = True here — counting is unreliable.
         # Only lock when we have definitive signals (blind post or a=c/SB vMin).
@@ -247,6 +296,7 @@ class LogWatcher:
         self.board = []
         self.occupied_seats = [0]  # hero always seat 0
         self.hero_position = None
+        self.position_source = None
         self.num_players = 0
         self.new_hand = True
         self.facing_bet = False
@@ -452,12 +502,10 @@ class LogWatcher:
                 if 0 < v_max < 4000000000:
                     self.hero_stack_chips = v_max
             elif act == 'P':  # post BB (non-Zoom only)
-                self.hero_position = 'BB'
-                self._position_locked = True
+                self._set_position('BB', "log-blind-post-BB", locked=True)
                 self.bb_size = v_min
             elif act == 'p':  # post SB (non-Zoom only)
-                self.hero_position = 'SB'
-                self._position_locked = True
+                self._set_position('SB', "log-blind-post-SB", locked=True)
                 if self.bb_size == 0:
                     self.bb_size = v_min * 2
 
@@ -490,15 +538,13 @@ class LogWatcher:
         if self.street == 'preflop' and not self._position_locked:
             if self.can_check:
                 # Check preflop is only possible for BB in unraised pot
-                self.hero_position = 'BB'
-                self._position_locked = True
+                self._set_position('BB', "log-can-check-BB", locked=True)
             elif (self.facing_bet and self.bb_size > 0
                   and self.call_amount == self.bb_size // 2):
                 # vMin exactly = SB → SB completing to BB in unraised pot.
                 # (Narrow condition to avoid false positives from non-standard
                 #  raises that happen to be odd fractions of BB.)
-                self.hero_position = 'SB'
-                self._position_locked = True
+                self._set_position('SB', "log-complete-SB", locked=True)
 
         # Track preflop raises
         if self.street == 'preflop' and self.facing_bet:
@@ -587,6 +633,9 @@ class LiveAdvisor(tk.Tk):
         # се за correction attribution когато user въведе ръчни карти.
         self._last_scan_id = None
         self._last_scan_hand_id = None
+        self._last_scan_card_images = None
+        self._hole_source = None
+        self._hole_confidence = None
         if _LOG:
             _LOG.info("[INIT] LiveAdvisor started; scanner=%s",
                       "OK" if self.scanner and self.scanner.available
@@ -749,6 +798,10 @@ class LiveAdvisor(tk.Tk):
         self.texture_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.texture_var, bg=self.BG, fg="#77bbaa",
                  font=("Segoe UI", 11), pady=2).pack()
+        self.advice_warning_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.advice_warning_var, bg=self.BG,
+                 fg="#ffcc66", font=("Segoe UI", 10, "bold"), pady=1,
+                 wraplength=600).pack()
 
         # PREFLOP
         pf = tk.Frame(self, bg="#1a2e20")
@@ -822,6 +875,9 @@ class LiveAdvisor(tk.Tk):
             btn.config(bg="#2a3a2a")
         for btn in self.suit_btns.values():
             btn.config(state="disabled")
+        if len(self.hole_cards) == 2:
+            self._hole_source = "manual"
+            self._hole_confidence = 1.0
         self._update_display()
         if len(self.hole_cards) < 2:
             self.status_var.set("Pick 2nd card")
@@ -841,11 +897,14 @@ class LiveAdvisor(tk.Tk):
                 _LOG.info("[UI] manual cards entered=%s hand=%s",
                           " ".join(f"{r}{s}" for r, s in self.hole_cards),
                           self.watcher.hand_id or "-")
+            self._learn_templates_from_cards(self.hole_cards)
 
     def _reset_picker(self):
         """Reset the card picker UI state (no redraw)."""
         self.hole_cards = []
         self.pending_rank = None
+        self._hole_source = None
+        self._hole_confidence = None
         self.pending_lbl.config(text="")
         for btn in self.rank_btns.values():
             btn.config(bg="#2a3a2a")
@@ -1414,8 +1473,10 @@ class LiveAdvisor(tk.Tk):
         conf = result["confidence"]
         r1, s1 = cards[0]; r2, s2 = cards[1]
         det_str = f"{r1}{SYM[s1]} {r2}{SYM[s2]}"
-        auto_thr = float(self.scanner.config.get("auto_confirm_threshold", 0.85))
-        conf_thr = float(self.scanner.config.get("confirm_threshold", 0.50))
+        auto_thr = float(self.scanner.config.get("auto_confirm_threshold", 0.30))
+        conf_thr = float(self.scanner.config.get("confirm_threshold", 0.15))
+        self._last_scan_hand_id = hand_id_at_start
+        self._last_scan_card_images = result.get("card_images")
 
         # Регистрирай scan record (outcome-ът се update-ва по-долу)
         scan_id = None
@@ -1439,12 +1500,13 @@ class LiveAdvisor(tk.Tk):
                 "outcome": "pending",
             })
             self._last_scan_id = scan_id
-            self._last_scan_hand_id = hand_id_at_start
 
         if conf >= auto_thr:
             if manual_trigger:
                 self.hole_cards = []
             self.hole_cards = list(cards)
+            self._hole_source = "scan"
+            self._hole_confidence = conf
             self._update_display()
             self.status_var.set(
                 f"\U0001F50D {det_str} ({int(conf*100)}% • {duration_ms}ms)")
@@ -1523,11 +1585,16 @@ class LiveAdvisor(tk.Tk):
             return None
         n = (self.watcher.num_players
              or self.watcher._view_num_players or 6)
-        pos, slot, ang, err = position_from_dealer_ratio(
-            det["x_ratio"], det["y_ratio"], n,
-        )
+        chosen = choose_dealer_candidate(det, n)
+        if chosen is not None:
+            det = {**det, **chosen}
+        pos = det.get("pos", "?")
+        slot = int(det.get("slot", -1))
+        ang = float(det.get("angle", 0.0))
+        err = float(det.get("err", 999.0))
         msg = (f"D→{pos} (slot {slot}, ang={ang:.0f}°, "
-               f"err={err:.0f}°, conf={det['confidence']:.2f})")
+               f"err={err:.0f}°, conf={det['confidence']:.2f}, "
+               f"fit={det.get('combined_score', det['confidence']):.2f})")
         if not auto:
             self.status_var.set(msg)
             if debug_dir and debug_dir.exists():
@@ -1537,7 +1604,9 @@ class LiveAdvisor(tk.Tk):
                         f"window_title:   {win.title!r}",
                         f"window_rect:    {self.scanner.window_rect(win)}",
                         f"num_players:    {n} (watcher={self.watcher.num_players}, view={self.watcher._view_num_players})",
-                        f"log_position:   {self.watcher.hero_position} (locked={self.watcher._position_locked})",
+                        f"log_position:   {self.watcher.hero_position} "
+                        f"(source={getattr(self.watcher, 'position_source', None)}, "
+                        f"locked={self.watcher._position_locked})",
                         f"hough_total:    {det.get('hough_total', '?')}",
                         f"rejected:       {det.get('rejected_count', '?')}",
                         f"passed_count:   {len(det.get('candidates', []))}",
@@ -1557,14 +1626,20 @@ class LiveAdvisor(tk.Tk):
                         lines.append(
                             f"{'#':>2} {'x%':>6} {'y%':>6} {'r':>3} "
                             f"{'bright':>7} {'red%':>6} {'sat':>5} "
-                            f"{'score':>6} {'→hero':>7} {'slot':>5} "
-                            f"{'ang':>6} {'err':>5}"
+                            f"{'score':>6} {'fit':>6} {'→hero':>7} "
+                            f"{'slot':>5} {'ang':>6} {'err':>5}"
                         )
                         for i, ca in enumerate(cands):
                             p2, s2, a2, e2 = position_from_dealer_ratio(
                                 ca["x_ratio"], ca["y_ratio"], n,
                             )
-                            mark = "★" if i == 0 else ""
+                            visual = float(ca.get("score", 0) or 0)
+                            afit = 0.0 if p2 == '?' else max(0.0, min(1.0, 1.0 - (e2 / 30.0)))
+                            fit = 0.55 * visual + 0.45 * afit
+                            mark = "★" if (
+                                abs(ca["x_ratio"] - det["x_ratio"]) < 0.0001
+                                and abs(ca["y_ratio"] - det["y_ratio"]) < 0.0001
+                            ) else ""
                             lines.append(
                                 f"{i:>2d} "
                                 f"{ca['x_ratio']*100:>5.1f}% "
@@ -1574,6 +1649,7 @@ class LiveAdvisor(tk.Tk):
                                 f"{ca['red_ratio']*100:>5.1f}% "
                                 f"{ca.get('ring_sat',0):>5.0f} "
                                 f"{ca.get('score',0):>6.3f} "
+                                f"{fit:>6.3f} "
                                 f"{p2:>6s}{mark} "
                                 f"{s2:>5d} "
                                 f"{a2:>+5.0f}° "
@@ -1587,10 +1663,14 @@ class LiveAdvisor(tk.Tk):
                     os.startfile(str(debug_dir))
                 except Exception as e:
                     print(f"btn.txt write error: {e}")
-        # Auto-apply само ако имаме разумен ъгъл и вече имаме хора
-        if auto and pos != '?' and err < 25 and det["confidence"] > 0.3:
-            self.watcher.hero_position = pos
-            self.watcher._position_locked = True
+        # Auto-apply само ако нямаме вече по-силен log lock.
+        log_locked = (
+            self.watcher._position_locked
+            and str(getattr(self.watcher, "position_source", "")).startswith("log-")
+        )
+        good_fit = det.get("combined_score", det["confidence"]) >= 0.58
+        if auto and not log_locked and pos != '?' and err < 18 and good_fit:
+            self.watcher._set_position(pos, "dealer-button-scan", locked=True)
             self.watcher.num_players = n
         return {"pos": pos, "slot": slot, "angle": ang,
                 "err": err, "det": det}
@@ -1659,8 +1739,11 @@ class LiveAdvisor(tk.Tk):
         self.scan_no_btn.pack_forget()
         if pend and not self.hole_cards:
             self.hole_cards = list(pend["cards"])
+            self._hole_source = "confirmed-scan"
+            self._hole_confidence = pend.get("confidence")
             self._update_display()
             self._last_scanned_hand_id = self.watcher.hand_id
+            self._learn_templates_from_cards(self.hole_cards)
             if poker_logger and self._last_scan_id is not None:
                 poker_logger.update_scan_outcome(
                     self._last_scan_id, "confirm_accepted")
@@ -1678,6 +1761,32 @@ class LiveAdvisor(tk.Tk):
         if poker_logger and self._last_scan_id is not None:
             poker_logger.update_scan_outcome(
                 self._last_scan_id, "confirm_rejected")
+
+    def _learn_templates_from_cards(self, cards):
+        """Save local rank/suit templates from trusted user-provided cards."""
+        if not self.scanner or not self.scanner.available or len(cards) != 2:
+            return
+        imgs = None
+        if (self._last_scan_card_images is not None
+                and self._last_scan_hand_id == self.watcher.hand_id):
+            imgs = self._last_scan_card_images
+        if imgs is None:
+            try:
+                win = self.scanner.find_ps_window()
+                if win is not None:
+                    imgs = self.scanner.capture_hole_region(win)
+            except Exception:
+                imgs = None
+        if not imgs:
+            return
+        try:
+            written = self.scanner.learn_card_templates(tuple(imgs), list(cards))
+        except Exception:
+            written = 0
+        if written and _LOG:
+            _LOG.info("[SCAN] learned %d template samples from hand=%s cards=%s",
+                      written, self.watcher.hand_id or "-",
+                      " ".join(f"{r}{s}" for r, s in cards))
 
     # ── Polling ───────────────────────────────────────────────────────────────
     def _poll(self):
@@ -1763,6 +1872,91 @@ class LiveAdvisor(tk.Tk):
         # Trigger scan scheduler (same as _maybe_autoscan path)
         self._maybe_autoscan()
 
+    @staticmethod
+    def _position_source_label(source):
+        if not source:
+            return ""
+        if source == "dealer-button-scan":
+            return "D"
+        if source.startswith("fallback-count:"):
+            return source.replace("fallback-", "")
+        if source.startswith("log-"):
+            return "log"
+        return source
+
+    @staticmethod
+    def _action_is_aggressive(action):
+        text = str(action or "").upper()
+        if text.startswith("BET"):
+            return True
+        return any(tok in text for tok in (
+            "RAISE", "3-BET", "4-BET", "ALL-IN", "SHOVE",
+        ))
+
+    @staticmethod
+    def _hand_is_nutted(hand_label="", hero_class=None):
+        cls = str(hero_class or "").lower()
+        if cls in {"quads", "full_house", "flush", "straight", "set"}:
+            return True
+        label = str(hand_label or "").upper()
+        return any(tok in label for tok in (
+            "QUADS", "BOAT", "FULL HOUSE", "FLUSH", "STRAIGHT",
+        ))
+
+    @staticmethod
+    def _context_warnings(position_source=None, hero_pos=None, street="preflop",
+                          facing=False, stack_bb=None, pot_bb=None,
+                          num_opponents=1, hole_source=None,
+                          hole_confidence=None):
+        warnings = []
+        src = str(position_source or "")
+        if not hero_pos:
+            warnings.append("pos unknown")
+        elif src.startswith("fallback-count:"):
+            warnings.append("pos fallback")
+        elif src == "dealer-button-scan":
+            warnings.append("pos from D scan")
+
+        if hole_source == "scan" and hole_confidence is not None:
+            try:
+                conf = float(hole_confidence)
+            except (TypeError, ValueError):
+                conf = None
+            if conf is not None and conf < 0.75:
+                warnings.append(f"hole scan {int(conf * 100)}%")
+
+        if street != "preflop":
+            if stack_bb is None:
+                warnings.append("stack unknown")
+            if pot_bb is None:
+                warnings.append("pot unknown")
+            elif facing:
+                warnings.append("pot/SPR estimate")
+            if num_opponents >= 2:
+                warnings.append("multiway tighten")
+        return warnings
+
+    @classmethod
+    def _guarded_action(cls, action, color, hand_label="", hero_class=None,
+                        warnings=None):
+        if (warnings and cls._action_is_aggressive(action)
+                and not cls._hand_is_nutted(hand_label, hero_class)):
+            return f"VERIFY -> {action}", "#ffcc66"
+        return action, color
+
+    @staticmethod
+    def _warning_text(warnings):
+        if not warnings:
+            return ""
+        return "VERIFY: " + "; ".join(warnings)
+
+    @classmethod
+    def _reason_with_warnings(cls, reason, warnings):
+        note = cls._warning_text(warnings)
+        if not note:
+            return reason
+        return f"{reason}  [{note}]"
+
     # ── Display ───────────────────────────────────────────────────────────────
     def _update_display(self):
         w = self.watcher
@@ -1770,6 +1964,7 @@ class LiveAdvisor(tk.Tk):
         board = w.board
         pos = w.hero_position
         n_players = w.num_players
+        context_warnings = []
 
         # Format call amount for display
         bb = w.bb_size if w.bb_size > 0 else 20000
@@ -1783,7 +1978,9 @@ class LiveAdvisor(tk.Tk):
             alive = len(w.occupied_seats) - len(w.folded_seats)
             parts.append(f"{alive}/{n_players}p")
         if pos:
-            parts.append(pos)
+            src = getattr(w, "position_source", None)
+            src_label = self._position_source_label(src)
+            parts.append(f"{pos}[{src_label}]" if src_label else pos)
         if w.street != 'preflop':
             parts.append(w.street.upper())
         if w.facing_bet:
@@ -1828,7 +2025,25 @@ class LiveAdvisor(tk.Tk):
         if len(hole) == 2:
             facing_raise = w.facing_raise_preflop or (w.street == 'preflop' and w.facing_bet and call_bb > 1.5)
             pf = preflop_analyze(hole, hero_pos=pos, facing_raise=facing_raise)
-            action_text = pf["action"]
+            num_opp_est = max(
+                1, (len(w.occupied_seats) - len(w.folded_seats)) - 1,
+            )
+            pf_warnings = self._context_warnings(
+                position_source=getattr(w, "position_source", None),
+                hero_pos=pos,
+                street="preflop",
+                facing=facing_raise,
+                num_opponents=num_opp_est,
+                hole_source=self._hole_source,
+                hole_confidence=self._hole_confidence,
+            )
+            if len(board) < 3:
+                context_warnings = pf_warnings
+            guarded_action, guarded_color = self._guarded_action(
+                pf["action"], pf["color"], pf.get("hand", ""),
+                warnings=pf_warnings,
+            )
+            action_text = guarded_action
             if facing_raise:
                 # Показвай BB sizing само ако сме още preflop; на postflop street
                 # call_amount не е preflop raise sizing — не подвеждай.
@@ -1837,8 +2052,9 @@ class LiveAdvisor(tk.Tk):
                 else:
                     action_text = f"[vs RAISE] {action_text}"
             self.pf_action_var.set(action_text)
-            self.pf_reason_var.set(pf["reason"])
-            self.pf_action_lbl.config(fg=pf["color"])
+            self.pf_reason_var.set(
+                self._reason_with_warnings(pf["reason"], pf_warnings))
+            self.pf_action_lbl.config(fg=guarded_color)
             # Strategy log: preflop advice
             if self.strategy_logger and w.hand_id:
                 try:
@@ -1888,14 +2104,31 @@ class LiveAdvisor(tk.Tk):
 
                 r = postflop_analyze(hole, board, facing_bet=facing, hero_pos=pos, villain_pos=vp,
                                      stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp)
+                post_warnings = self._context_warnings(
+                    position_source=getattr(w, "position_source", None),
+                    hero_pos=pos,
+                    street=w.street,
+                    facing=facing,
+                    stack_bb=stack_bb,
+                    pot_bb=pot_bb,
+                    num_opponents=num_opp,
+                    hole_source=self._hole_source,
+                    hole_confidence=self._hole_confidence,
+                )
+                context_warnings = post_warnings
                 street_name = w.street.upper() if w.street != 'preflop' else "FLOP"
-                action_text = r['action']
+                guarded_action, guarded_color = self._guarded_action(
+                    r["action"], r["color"], r.get("hand", ""),
+                    r.get("hero_class"), post_warnings,
+                )
+                action_text = guarded_action
                 if facing:
                     action_text = f"[vs BET {call_bb:.1f}BB] {action_text}"
                 self.post_action_var.set(f"[{street_name}] {action_text}")
                 self.post_hand_var.set(r['hand'])
-                self.post_reason_var.set(r["reason"])
-                self.post_action_lbl.config(fg=r["color"])
+                self.post_reason_var.set(
+                    self._reason_with_warnings(r["reason"], post_warnings))
+                self.post_action_lbl.config(fg=guarded_color)
                 self.sizing_var.set(r.get("sizing", ""))
                 # ── ТИ ИМАШ / ТЕ БИЕ поленце ──
                 hero_label = r.get("hero_label", "")
@@ -1941,6 +2174,8 @@ class LiveAdvisor(tk.Tk):
             self.sizing_var.set("")
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
+
+        self.advice_warning_var.set(self._warning_text(context_warnings))
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ rules, 3 concepts (Positional/Range/Nut advantage), SPR buckets, float theory.
 | `poker_live.py` | tkinter GUI + LogWatcher (parse PS log) + scanner wiring |
 | `poker_scanner.py` | OCR скенер (EasyOCR + Tesseract) + button detector |
 | `poker_logger.py` | Наблюдател за PS лога (standalone debug tool) |
-| `scanner_config.json` | Калибрация + thresholds (auto-generated) |
-| `scanner_templates/` | OCR templates (auto-populated от training mode) |
+| `scanner_config.example.json` | Шаблон за локална калибрация |
+| `scanner_templates/` | Local rank/suit templates (auto-populated от trusted manual corrections) |
 
 ## Архитектурни принципи
 
@@ -48,8 +48,9 @@ Signature: `(hole, board, facing_bet, hero_pos, villain_pos, stack_bb, pot_bb, n
 
 Логика:
 - SPR bucket → `commit/standard/cautious/deep` (влияе на TP/overpair stack-off behavior)
-- Multiway (num_opponents ≥ 2) → `_mw_adjust` demotes RAISE→CALL, BET→CHECK за не-монстри
+- Multiway (num_opponents ≥ 2) → `_mw_adjust` demotes non-nut RAISE/ALL-IN→CALL and BET→CHECK; monsters and high-equity semi-bluffs keep aggression
 - Board texture → sizing (Upswing Rules 3-8)
+- UI guardrails mark aggressive non-nut advice as `VERIFY ->` when cards, position, pot/SPR, or multiway context is uncertain
 
 ### Utility functions
 - `equity_from_outs(outs, streets_left)` — Rule of 2 & 4
@@ -63,9 +64,10 @@ Signature: `(hole, board, facing_bet, hero_pos, villain_pos, stack_bb, pot_bb, n
 ## Scanner (`poker_scanner.py`)
 
 ### OCR pipeline
-1. **EasyOCR primary** — multi-scale (6×, 4×, 8×), early-exit at conf ≥ 0.90, sharpen+contrast enhancement
-2. **Tesseract fallback** — когато EasyOCR fail-не или conf < 0.30
-3. **Tiebreakers**:
+1. **Template matching primary** — локални rank/suit templates от `scanner_templates/`; active като primary само след достатъчно coverage (`rank_min_labels`, `suit_min_labels`)
+2. **EasyOCR fallback/confirm** — multi-scale (6×, 4×, 8×), early-exit at conf ≥ 0.90, sharpen+contrast enhancement
+3. **Tesseract fallback** — когато EasyOCR fail-не или conf < 0.30
+4. **Tiebreakers**:
    - **T↔4**: когато EasyOCR каже T → cross-check с Tesseract (винаги), "4" override при conf ≥ 0.6
    - **6↔7**: Tesseract cross-check + shape-based detector (flood-fill за loop detection)
 
@@ -82,10 +84,17 @@ Signature: `(hole, board, facing_bet, hero_pos, villain_pos, stack_bb, pot_bb, n
 ### Dealer button detection
 - HoughCircles + **red center check** (≥5% red pixels в центъра) за да избегнем false positives от "77" overlay
 - Scoring: `0.4 * brightness_norm + 0.6 * red_ratio_norm`
+- Live selection re-ranks all passed candidates with seat geometry:
+  `0.55 * visual_score + 0.45 * angle_fit`; auto-apply requires `err < 18`
+  and does not override a log-locked blind position.
 
-### Confidence thresholds (scanner_config.json)
+### Confidence thresholds (scanner config)
 - `auto_confirm_threshold: 0.30` — auto-accept под тази граница (почти всички scans)
 - `confirm_threshold: 0.15` — под тази — show confirm UI
+
+`scanner_config.json` е локален ignored файл. Repo-то държи само
+`scanner_config.example.json`, за да не комитва monitor calibration или window title
+с потребителско име.
 
 ## Log parsing (`poker_live.py::LogWatcher`)
 
@@ -116,6 +125,7 @@ BB, `call_amount == bb_size // 2` → SB. Counting fallback само когат�
 - Hole cards: manual pick (rank + suit бутони) ИЛИ auto-scan (когато checkbox е ON)
 - Board: auto от лог
 - Auto-scan flow: MSG_0080 → delay (500ms) → scanner.scan() → ако conf ≥ auto_confirm → apply; иначе confirm UI
+- Advice warning line: `VERIFY:` appears for fallback/D-scan position, low-confidence auto-scan cards, estimated pot/SPR, unknown stack, or multiway tightening
 - Training mode: всяко ръчно въвеждане записва templates (disabled в production)
 - Debug scan бутон (при manual click на "Debug scan"): пише `debug.txt` + card1/2.png + window.png в `%TEMP%\poker_scan_debug_<timestamp>\`
 
@@ -133,6 +143,8 @@ BB, `call_amount == bb_size // 2` → SB. Counting fallback само когат�
 - Само single-table
 - Без мобилна версия
 - Templates не се комитват в git (user-specific)
+- `scanner_config.json` не се комитва в git (user-specific calibration)
+- `scanner_templates/` не се комитва в git (user-specific local samples)
 
 ## Обичайни промени
 
@@ -146,6 +158,9 @@ BB, `call_amount == bb_size // 2` → SB. Counting fallback само когат�
 ```python
 # Sanity check на imports
 python -c "from poker_oop_tool import preflop_analyze, postflop_analyze; print('ok')"
+
+# Regression suite
+python -m unittest discover -s tests -v
 
 # Regression tests (ръчно)
 python -c "
