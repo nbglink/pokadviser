@@ -211,29 +211,29 @@ def _preflop_hand_strength(hand_str):
     return 0
 
 
-def narrow_range_facing_bet(open_range, street, board=None, hero_class=None):
+def narrow_range_facing_bet(open_range, street, board=None, hero_class=None,
+                             villain_type='tag'):
     """Drop the bottom X% of opening range when villain has bet postflop.
 
-    На all-fold checks engine-ът използва пълния opening range (default).
-    На turn/river facing bet, villain'ското range е по-тясно — drop-ваме
-    bottom-fraction по preflop hand strength.
-
-    Drop ratios (empirically chosen, conservative):
-      flop  → 30%   (villain c-bets широко; малко narrowing)
-      turn  → 50%   (втори barrel идва от value-heavy range)
-      river → 65%   (river bet = много narrow nut/strong range)
+    Villain type modifier:
+      lag (loose-aggressive): bets wider → narrow LESS (factor 0.6)
+      tag (tight-aggressive, default): standard narrowing
+      nit (very tight): bets near-nuts only → narrow MORE (factor 1.3)
+      whale (calling station / random): unpredictable → almost no narrow
 
     Args:
-        open_range: set of hand strings ({'AKs','77',...})
+        open_range: set of hand strings
         street: 'flop' | 'turn' | 'river'
         board, hero_class: за бъдещи refinements (unused за сега)
-
-    Returns: narrowed set (subset of open_range).
+        villain_type: 'lag' | 'tag' | 'nit' | 'whale'
     """
     if not open_range:
         return open_range
     DROP_PCT = {'flop': 0.30, 'turn': 0.50, 'river': 0.65}
     drop = DROP_PCT.get(street, 0.30)
+    type_mult = {'lag': 0.6, 'tag': 1.0, 'nit': 1.3, 'whale': 0.2}
+    drop *= type_mult.get(villain_type, 1.0)
+    drop = min(0.85, max(0.0, drop))
     sorted_hands = sorted(open_range, key=_preflop_hand_strength, reverse=True)
     keep = max(1, int(round(len(sorted_hands) * (1 - drop))))
     return set(sorted_hands[:keep])
@@ -1725,7 +1725,9 @@ def spr_bucket(spr):
 # ─── Postflop анализ (v4 — с SPR) ─────────────────────────────────────────────
 def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=None,
                      stack_bb=None, pot_bb=None, num_opponents=1,
-                     call_bb=None, is_3bet_pot=False, icm_pressure=0.0):
+                     call_bb=None, is_3bet_pot=False, icm_pressure=0.0,
+                     prev_street_checked_thru=False, villain_type='tag',
+                     ante_bb=0.0):
     """Postflop decision engine.
 
     Args:
@@ -1779,7 +1781,8 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     villain_range = OPEN_RANGES.get(villain_pos) or OPEN_RANGES.get('CO', set())
     if facing_bet and len(board) >= 3:
         villain_range = narrow_range_facing_bet(
-            villain_range, street_name, board, hero_class)
+            villain_range, street_name, board, hero_class,
+            villain_type=villain_type)
     range_info = range_breakdown(hole, board, villain_range, hero_class)
     beat_pct = range_info['beat_pct'] if range_info else None
     lose_pct = range_info['lose_pct'] if range_info else None
@@ -1934,6 +1937,33 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             default_bet_pct = 0.33
             sizing = "Sizing: 25-33% пот (3-bet pot — малки sizing-и)"
         threebet_note = "3-bet pot: tighter ranges, малък sizing, бърз commit"
+
+    # Polarized vs linear sizing override:
+    # - Polarized range (nuts + bluffs) → larger bet/overbet
+    # - Linear/merged range (TP/2pair value) → smaller bet
+    # Прилага се на river, и на turn за clearly polarized hands.
+    polarized_note = ""
+    if street_name == 'river' and not is_3bet_pot:
+        if hero_class in ('flush', 'straight', 'full_house', 'quads',
+                          'straight_flush', 'set'):
+            # Strong made hand on river — overbet когато board favors nuts
+            if bi.get('is_dry') or bi.get('is_paired'):
+                default_bet_pct = 0.85  # 75-100% пот
+                sizing = "Sizing: 75-100% пот (polarized: nuts → overbet)"
+            else:
+                default_bet_pct = 1.10  # overbet on dynamic boards
+                sizing = "Sizing: 100-125% пот (polarized overbet — wet board)"
+            polarized_note = "polarized range: nut/bluff split → голям sizing"
+        elif hero_class in ('two_pair', 'trips'):
+            # Medium-strong: thin value with merged range → smaller sizing
+            default_bet_pct = 0.55
+            sizing = "Sizing: 50-66% пот (merged value)"
+            polarized_note = "merged range (medium value) → среден sizing"
+        elif hero_class == 'pair':
+            # TP/marginal pair: thin value, small sizing
+            default_bet_pct = 0.40
+            sizing = "Sizing: 33-50% пот (linear value)"
+            polarized_note = "linear range (TP value): малък sizing"
     # Blocker awareness: hero блокира ли nut combos?
     blocker_note = _blocker_note(hole, board, hero_class)
     # Range vs range advantage — informational, append to reason.
@@ -1946,6 +1976,26 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             rva_note = (f"range advantage: {sign}{delta:.2f} → "
                         f"{rva_info['label']}")
 
+    # Probe bet opportunity: villain checked back previous street → weak
+    # range capped. Hero OOP може да lead-не за thin value/bluff на turn/river.
+    probe_note = ""
+    is_probe_spot = (
+        prev_street_checked_thru
+        and street_name in ('turn', 'river')
+        and not hero_ip
+        and not facing_bet
+    )
+    if is_probe_spot:
+        probe_note = ("probe spot: villain checked previous street → "
+                      "капнат range; hero може lead за thin value")
+
+    # Villain type adjustment: scales the range-narrowing aggressiveness
+    # used in narrow_range_facing_bet calls. LAG bets wider (don't narrow
+    # as much); NIT bets only nuts (narrow more).
+    villain_note = ""
+    if villain_type and villain_type != 'tag':
+        villain_note = f"villain={villain_type.upper()}"
+
     pn = f"  [{pa['note']}]" if pa.get('note') else ""
     sn = f"  [{spr_note}]" if spr_note else ""
     mn = f"  [{mw_note}]" if mw_note else ""
@@ -1955,6 +2005,9 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     rvn = f"  [{rva_note}]" if rva_note else ""
     icmn = (f"  [ICM pressure {int(icm_pressure*100)}%: tighter, "
             f"avoid stacking off marginal]" if icm_pressure >= 0.3 else "")
+    pln = f"  [{polarized_note}]" if polarized_note else ""
+    prn = f"  [{probe_note}]" if probe_note else ""
+    vtn = f"  [{villain_note}]" if villain_note else ""
 
     def _mw_adjust(action, color, hand_label):
         """При multiway смъкваме агресията за non-nut hands.
@@ -2015,7 +2068,7 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         a3, c3 = _threat_adjust(a2, c2, h)
         return dict(
             action=a3, color=c3, hand=h,
-            reason=r + pn + sn + mn + ftn + tbn + bln + rvn + icmn,
+            reason=r + pn + sn + mn + ftn + tbn + bln + rvn + icmn + pln + prn + vtn,
             sizing=sizing,
             hero_class=hero_class,
             hero_label=hero_label,
@@ -2028,6 +2081,9 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             primary_freq=primary_freq,
             range_advantage=rva_info,
             icm_pressure=icm_pressure,
+            is_probe_spot=is_probe_spot,
+            villain_type=villain_type,
+            ante_bb=ante_bb,
         )
 
     # Draw outs (0 on river) — виж OUTS_* константи най-горе
