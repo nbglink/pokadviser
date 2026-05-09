@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -169,6 +170,7 @@ def _get_easyocr_reader():
 # ═══ Константи ═════════════════════════════════════════════════════════
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "scanner_config.json"
+TEMPLATES_DIR = HERE / "scanner_templates"
 
 RANKS = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
 # "O" в allowlist — OCR често бърка Q с O (липсва опашката в Q).
@@ -204,9 +206,18 @@ DEFAULT_CALIBRATION: Dict[str, Any] = {
 DEFAULT_CONFIG: Dict[str, Any] = {
     "calibration": None,
     "scan_delay_ms": 500,
-    "auto_confirm_threshold": 0.85,
-    "confirm_threshold": 0.50,
+    "auto_confirm_threshold": 0.30,
+    "confirm_threshold": 0.15,
     "window_title_match": "PokerStars",
+    "template_matching_enabled": True,
+    # Primary template recognition is only safe once most classes exist.
+    # Before that, templates are used to confirm/override OCR only on known
+    # classes with very high confidence.
+    "template_rank_min_labels": 10,
+    "template_suit_min_labels": 4,
+    "template_accept_confidence": 0.78,
+    "template_override_confidence": 0.88,
+    "template_max_samples_per_label": 25,
 }
 
 # EasyOCR optimization: започваме от 6× (sweet spot). При confident hit
@@ -474,6 +485,176 @@ class CardScanner:
         self.save_config()
         return True
 
+    # ── Template learning / matching ─────────────────────────────────
+    def _template_patch(self, card_img: "Image.Image", kind: str) -> Optional[Any]:
+        """Return normalized binary patch for rank or suit template matching."""
+        if cv2 is None or np is None or Image is None:
+            return None
+        try:
+            arr_full = np.array(card_img.convert("RGB"))
+            H, W = arr_full.shape[:2]
+            if H < 8 or W < 8:
+                return None
+            if kind == "rank":
+                roi = arr_full[: max(1, int(H * 0.68)), :]
+                out_size = (48, 64)
+            elif kind == "suit":
+                roi = arr_full[max(0, int(H * 0.28)) :, :]
+                out_size = (48, 48)
+            else:
+                return None
+            if roi.size == 0:
+                return None
+            gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
+            _ret, bw = cv2.threshold(
+                gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
+            kernel = np.ones((2, 2), dtype=np.uint8)
+            bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
+            return cv2.resize(bw, out_size, interpolation=cv2.INTER_AREA)
+        except Exception:
+            return None
+
+    def _template_base(self, kind: str) -> Path:
+        return TEMPLATES_DIR / kind
+
+    def _template_label_count(self, kind: str) -> int:
+        base = self._template_base(kind)
+        if not base.exists():
+            return 0
+        try:
+            return sum(1 for p in base.iterdir() if p.is_dir() and any(p.glob("*.png")))
+        except Exception:
+            return 0
+
+    def _iter_template_files(self, kind: str):
+        base = self._template_base(kind)
+        if not base.exists():
+            return
+        valid = set(RANKS if kind == "rank" else ["h", "d", "c", "s"])
+        for label_dir in base.iterdir():
+            if not label_dir.is_dir() or label_dir.name not in valid:
+                continue
+            for path in label_dir.glob("*.png"):
+                yield label_dir.name, path
+
+    def _detect_template(self, card_img: "Image.Image", kind: str) -> Optional[Dict[str, Any]]:
+        if not self.config.get("template_matching_enabled", True):
+            return None
+        if cv2 is None or np is None:
+            return None
+        patch = self._template_patch(card_img, kind)
+        if patch is None:
+            return None
+
+        best_label = None
+        best_score = -1.0
+        second_score = -1.0
+        samples = 0
+        labels_seen = set()
+        for label, path in self._iter_template_files(kind) or []:
+            try:
+                tmpl = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+                if tmpl is None:
+                    continue
+                if tmpl.shape != patch.shape:
+                    tmpl = cv2.resize(
+                        tmpl, (patch.shape[1], patch.shape[0]),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                res = cv2.matchTemplate(patch, tmpl, cv2.TM_CCOEFF_NORMED)
+                score = float(res[0][0])
+                if not (-1.0 <= score <= 1.0):
+                    continue
+            except Exception:
+                continue
+            samples += 1
+            labels_seen.add(label)
+            if score > best_score:
+                if label != best_label:
+                    second_score = best_score
+                best_score = score
+                best_label = label
+            elif label != best_label and score > second_score:
+                second_score = score
+
+        if best_label is None or samples == 0:
+            return None
+        margin = best_score - second_score if second_score > -1 else 0.0
+        best_norm = max(0.0, min(1.0, best_score))
+        margin_norm = max(0.0, min(1.0, margin / 0.12))
+        confidence = max(0.0, min(1.0, 0.75 * best_norm + 0.25 * margin_norm))
+        return {
+            "label": best_label,
+            "confidence": confidence,
+            "score": best_score,
+            "margin": margin,
+            "coverage": len(labels_seen),
+            "samples": samples,
+        }
+
+    def _template_primary_ok(self, info: Optional[Dict[str, Any]], kind: str) -> bool:
+        if not info:
+            return False
+        min_key = "template_rank_min_labels" if kind == "rank" else "template_suit_min_labels"
+        min_labels = int(self.config.get(min_key, 10 if kind == "rank" else 4))
+        accept = float(self.config.get("template_accept_confidence", 0.78))
+        return info["coverage"] >= min_labels and info["confidence"] >= accept
+
+    def _save_template_sample(self, card_img: "Image.Image", kind: str, label: str) -> bool:
+        patch = self._template_patch(card_img, kind)
+        if patch is None or cv2 is None:
+            return False
+        label_dir = self._template_base(kind) / label
+        try:
+            label_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            suffix = int((time.time() % 1) * 1000)
+            out = label_dir / f"{ts}_{suffix:03d}.png"
+            ok = bool(cv2.imwrite(str(out), patch))
+            self._prune_template_samples(label_dir)
+            return ok
+        except Exception:
+            return False
+
+    def _prune_template_samples(self, label_dir: Path) -> None:
+        try:
+            max_samples = int(self.config.get("template_max_samples_per_label", 25))
+            files = sorted(label_dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+            for path in files[:-max_samples]:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def learn_card_templates(
+        self,
+        card_images: Tuple["Image.Image", "Image.Image"],
+        cards: List[Tuple[str, str]],
+    ) -> int:
+        """Learn rank/suit template samples from trusted manual cards.
+
+        Returns number of template files written. Only manual corrections or
+        explicit user confirmations should call this; auto-accepted scans are
+        not trustworthy enough to train from.
+        """
+        if not card_images or not cards or len(card_images) != len(cards):
+            return 0
+        written = 0
+        for img, card in zip(card_images, cards):
+            try:
+                rank, suit = card
+            except Exception:
+                continue
+            if rank in RANKS:
+                written += int(self._save_template_sample(img, "rank", rank))
+            if suit in ("h", "d", "c", "s"):
+                written += int(self._save_template_sample(img, "suit", suit))
+        return written
+
     # ── Suit detection (HSV color voting) ─────────────────────────────
     def detect_suit(self, card_img: "Image.Image") -> Tuple[Optional[str], float]:
         """HSV-based suit detection.
@@ -490,7 +671,15 @@ class CardScanner:
         card1 (винаги виждаш целия corner), но ПРОПУСКАШЕ rank corner-а
         на card2 при fan rendering → всяка card2 ставаше "♦" от purple felt AA.
         """
+        tmpl = self._detect_template(card_img, "suit")
+        if self._template_primary_ok(tmpl, "suit"):
+            return (tmpl["label"], tmpl["confidence"])
+
         if np is None or cv2 is None:
+            if tmpl and tmpl["confidence"] >= float(
+                self.config.get("template_override_confidence", 0.88)
+            ):
+                return (tmpl["label"], tmpl["confidence"])
             return (None, 0.0)
         try:
             arr_full = np.array(card_img.convert("RGB"))
@@ -547,8 +736,18 @@ class CardScanner:
             dominance = (sorted_v[0] - sorted_v[1]) / max(total, 1)
             ratio = votes[best] / total
             conf = max(0.0, min(1.0, 0.5 * ratio + 0.5 * dominance + 0.2))
+            if tmpl:
+                override = float(self.config.get("template_override_confidence", 0.88))
+                if tmpl["label"] == best:
+                    conf = max(conf, tmpl["confidence"])
+                elif tmpl["confidence"] >= override and conf < 0.55:
+                    return (tmpl["label"], tmpl["confidence"])
             return (best, conf)
         except Exception:
+            if tmpl and tmpl["confidence"] >= float(
+                self.config.get("template_override_confidence", 0.88)
+            ):
+                return (tmpl["label"], tmpl["confidence"])
             return (None, 0.0)
 
     # ── Rank detection ────────────────────────────────────────────────
@@ -560,10 +759,20 @@ class CardScanner:
         "T" с conf < 0.95, пускаме Tesseract за потвърждение; ако Tesseract
         върне "4" уверено → override към "4".
         """
+        tmpl = self._detect_template(card_img, "rank")
+        if self._template_primary_ok(tmpl, "rank"):
+            self._last_detector = (
+                f"template-rank(conf={tmpl['confidence']:.2f}, "
+                f"labels={tmpl['coverage']})"
+            )
+            return (tmpl["label"], tmpl["confidence"])
+
         if EASYOCR_AVAILABLE:
             self._last_ocr_source = None
             r, c = self._detect_rank_easyocr(card_img)
             if r is not None and c >= 0.30:
+                if tmpl and tmpl["label"] == r:
+                    c = max(c, tmpl["confidence"])
                 # 4↔T disambiguation: EasyOCR често чете "4" като "T" дори
                 # с много висок conf (0.96+). Винаги проверяваме T с Tesseract;
                 # ако Tesseract уверено чете "4" → override. Tesseract е по-точен
@@ -659,8 +868,18 @@ class CardScanner:
             r, c = self._detect_rank_tesseract(card_img)
             # По-нисък праг (0.3) — Tesseract е последна защита преди пълно fail
             if r is not None and c >= 0.3:
+                if tmpl and tmpl["label"] == r:
+                    c = max(c, tmpl["confidence"])
                 self._last_detector = f"tesseract(conf={c:.2f})"
                 return (r, c)
+        if tmpl and tmpl["confidence"] >= float(
+            self.config.get("template_override_confidence", 0.88)
+        ):
+            self._last_detector = (
+                f"template-rank-fallback(conf={tmpl['confidence']:.2f}, "
+                f"labels={tmpl['coverage']})"
+            )
+            return (tmpl["label"], tmpl["confidence"])
         self._last_detector = "failed"
         return (None, 0.0)
 
@@ -1295,6 +1514,7 @@ class CardScanner:
             "detectors": detectors,
             "easyocr_available": EASYOCR_AVAILABLE,
             "tesseract_ok": TESSERACT_OK,
+            "card_images": pair,
         }
 
 

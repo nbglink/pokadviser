@@ -9,10 +9,13 @@ with OCR, and provides GTO-aligned advice on every street.
 
 - **Auto board / position / street detection** from the client log
 - **OCR scanner** for the 2 hole cards (EasyOCR primary + Tesseract fallback)
+- **Local template matching** trained from trusted manual corrections
 - **Dealer button detection** via HoughCircles + red-center signature
 - **GTO-aligned strategy engine** based on Upswing Poker doctrine
 - **"YOU HAVE / YOU LOSE TO" panel** with hand classification + threats
 - **Multiway adjustment**, SPR buckets, board texture analysis
+- **Context guardrails** for uncertain OCR, fallback position, pot/SPR estimates
+- **Focus panel + compact mode** for one-glance decisions during play
 - Supports 6-max cash and fast-fold pools
 
 ## Files
@@ -24,7 +27,7 @@ with OCR, and provides GTO-aligned advice on every street.
 | `poker_scanner.py` | OCR scanner (EasyOCR + Tesseract) + button detector |
 | `poker_logger.py` | Standalone log watcher (debug) |
 | `poker_strategy_log.py` | JSONL logger for advice + actions |
-| `scanner_config.json` | Calibration + thresholds (auto-generated) |
+| `scanner_config.example.json` | Safe template for local scanner calibration |
 
 ## Installation
 
@@ -44,6 +47,24 @@ python poker_live.py
 The GUI will open. First press **"Calibrate"** to mark the hole card region
 (2 clicks on the table window). Then you can enable auto-scan.
 
+Useful in-game controls:
+- `COMPACT` hides manual picker/threat detail for a smaller overlay.
+- `F2` scans now, `F3` clears cards, `F4` toggles compact mode.
+- `Enter` accepts a pending scan confirmation; `Esc` rejects it.
+
+Calibration is local to the machine. The app writes `scanner_config.json`,
+which is ignored by git; use `scanner_config.example.json` as the template.
+
+Manual card corrections and accepted scan confirmations can populate
+`scanner_templates/` with local rank/suit samples. These templates are ignored
+by git and are used before OCR once enough rank/suit coverage exists.
+
+## Testing
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Architectural principles
 
 1. **Separation of concerns**: `poker_oop_tool.py` is pure strategy (no UI,
@@ -61,7 +82,8 @@ The GUI will open. First press **"Calibrate"** to mark the hole card region
 - **3 Concepts**: Positional, Range, Nut advantage
 - **SPR buckets**: commit / standard / cautious / deep
 - **Made hand priority**: Quads > Full House > Flush > Straight > Set > Trips > 2pair > Pair
-- **Multiway downgrade**: TP = 1 street, draws lose value, no bluff c-bets
+- **Multiway downgrade**: value-heavy lines, smaller sizing, high-equity bluffs only
+- **VERIFY guardrail**: aggressive non-nut advice is marked when key inputs are uncertain
 
 ## Out of scope
 

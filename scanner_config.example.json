@@ -1,0 +1,13 @@
+{
+  "calibration": null,
+  "scan_delay_ms": 500,
+  "auto_confirm_threshold": 0.30,
+  "confirm_threshold": 0.15,
+  "window_title_match": "PokerStars",
+  "template_matching_enabled": true,
+  "template_rank_min_labels": 10,
+  "template_suit_min_labels": 4,
+  "template_accept_confidence": 0.78,
+  "template_override_confidence": 0.88,
+  "template_max_samples_per_label": 25
+}
