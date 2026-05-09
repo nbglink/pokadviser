@@ -194,8 +194,9 @@ class LogWatcher:
 
         # Stack/pot tracking (за SPR)
         self.hero_stack_chips = 0   # ефективен stack на hero в chips (derived от vMx)
-        self.pot_chips = 0          # текущ pot в chips (approx, натрупан от действия)
+        self.pot_chips = 0          # action-based pot accumulator (chips)
         self._pot_preflop_baseline = 0  # pot at start of postflop street
+        self._prev_call_amount = 0  # last seen call_amount (за villain commit delta)
 
         # Hero action tracking (за strategy logger)
         self.last_hero_action = None    # {"code","amount","seq"}
@@ -265,6 +266,7 @@ class LogWatcher:
         self.hero_stack_chips = 0
         self.pot_chips = 0
         self._pot_preflop_baseline = 0
+        self._prev_call_amount = 0
         self.last_hero_action = None
         self.hero_action_new = False
         self.changed = True
@@ -380,12 +382,17 @@ class LogWatcher:
             line,
         )
         if m and m.group(1) == self.hand_id:
+            amt = int(m.group(3))
             self.last_hero_action = {
                 "code": m.group(2),
-                "amount": int(m.group(3)),
+                "amount": amt,
                 "seq": int(m.group(4)),
             }
             self.hero_action_new = True
+            # Pot accumulator: hero placed chips на масата.
+            # B=BET, E=RAISE, C=CALL — всички контрибутират.
+            if m.group(2) in ('B', 'E', 'C') and amt > 0:
+                self.pot_chips += amt
             # Не правим return — можем да имаме и други pattern-и в същата линия
 
         # ── MSG_0007 — action options for hero ──
@@ -506,6 +513,20 @@ class LogWatcher:
                 self._preflop_base_call = self.call_amount
             elif self.call_amount > self._preflop_base_call:
                 self.facing_raise_preflop = True
+
+        # Pot accumulator: initialize with blinds at first opportunity,
+        # add villain-commit delta when call_amount grows.
+        if self.bb_size > 0 and self.pot_chips == 0:
+            # SB+BB baseline (assumes SB = BB/2, common in PS cash + tourneys)
+            self.pot_chips = self.bb_size + self.bb_size // 2
+        if self.facing_bet and self.call_amount > self._prev_call_amount:
+            # Поне един villain е сложил (call_amount - prev) тази улица.
+            # Под-counting за multiway, но никога не е по-малко точно от 0.
+            self.pot_chips += (self.call_amount - self._prev_call_amount)
+            self._prev_call_amount = self.call_amount
+        if not self.facing_bet:
+            # Reset prev tracker когато никой не е bet-нал този кръг
+            self._prev_call_amount = 0
 
         # Position fallback: counting-based (unreliable in Zoom due to
         # pre-actions) when no definitive blind-option signal fired.
@@ -777,6 +798,10 @@ class LiveAdvisor(tk.Tk):
         self.post_hand_var = tk.StringVar(value="")
         tk.Label(res, textvariable=self.post_hand_var, bg=self.BG2, fg="#aaddaa",
                  font=("Segoe UI", 12), pady=2).pack()
+        # ── Decision strip (key numbers in one line) ──
+        self.decision_strip_var = tk.StringVar(value="")
+        tk.Label(res, textvariable=self.decision_strip_var, bg=self.BG2,
+                 fg="#aaccdd", font=("Consolas", 10), pady=1).pack()
         # ── "ТИ ИМАШ / ТЕ БИЕ" поленце ──
         self.threats_frame = tk.Frame(res, bg="#1a1a22", bd=1, relief="solid")
         self.threats_frame.pack(fill="x", padx=20, pady=4)
@@ -1896,12 +1921,15 @@ class LiveAdvisor(tk.Tk):
                 pot_bb = None
                 if w.bb_size > 0 and w.hero_stack_chips > 0:
                     stack_bb = w.hero_stack_chips / w.bb_size
-                if w.bb_size > 0 and facing and w.call_amount > 0:
-                    # Приблизителна оценка на pot: предполагаме villain бет ~50% пот
-                    # → pot преди неговия бет ≈ 2 * call; pot след бет ≈ 3 * call (excl hero call)
+                if w.bb_size > 0 and w.pot_chips > 0:
+                    # Action-based accumulator (blinds + observed bets/calls).
+                    # Точно колкото имаме; under-counts villain calls в multiway.
+                    pot_bb = w.pot_chips / w.bb_size
+                elif w.bb_size > 0 and facing and w.call_amount > 0:
+                    # Fallback heuristic: ~50% pot bet → pot_after = 3 * call
                     pot_bb = (w.call_amount * 3) / w.bb_size
                 elif w.bb_size > 0 and not facing:
-                    # PFA unопонен: grob pot ≈ 3bb * num_callers + blinds; approximate as 6bb
+                    # Last fallback: single-raise pot baseline
                     pot_bb = 6.0
                 # Multiway: alive - 1 = opponents (минус hero)
                 num_opp = max(1, (len(w.occupied_seats) - len(w.folded_seats)) - 1)
@@ -1933,6 +1961,20 @@ class LiveAdvisor(tk.Tk):
                 else:
                     self.threats_beat_var.set(f"ТЕ БИЕ{pct_beat}: nothing на този борд")
                 self._apply_threat_colors(beat_pct)
+                # ── Decision strip: ключови числа в един ред ──
+                strip_parts = []
+                if pot_bb and pot_bb > 0:
+                    strip_parts.append(f"Pot {pot_bb:.1f}BB")
+                if stack_bb and stack_bb > 0:
+                    strip_parts.append(f"Stack {stack_bb:.0f}BB")
+                if pot_bb and stack_bb and pot_bb > 0 and stack_bb > 0:
+                    strip_parts.append(f"SPR {stack_bb / pot_bb:.1f}")
+                if facing and call_bb > 0 and pot_bb and pot_bb > 0:
+                    needed = call_bb / (pot_bb + call_bb)
+                    strip_parts.append(f"need {needed * 100:.0f}% eq")
+                if beat_pct is not None:
+                    strip_parts.append(f"ТИ ~{beat_pct}%")
+                self.decision_strip_var.set(" · ".join(strip_parts))
                 # Strategy log: postflop advice
                 if self.strategy_logger and w.hand_id:
                     try:
@@ -1950,6 +1992,7 @@ class LiveAdvisor(tk.Tk):
                 self.sizing_var.set("")
                 self.threats_have_var.set("")
                 self.threats_beat_var.set("")
+                self.decision_strip_var.set("")
                 self._apply_threat_colors(None)
         elif len(hole) == 2:
             self.post_action_var.set("Preflop")
@@ -1959,6 +2002,7 @@ class LiveAdvisor(tk.Tk):
             self.sizing_var.set("")
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
+            self.decision_strip_var.set("")
             self._apply_threat_colors(None)
         else:
             self.post_action_var.set("")
@@ -1968,6 +2012,7 @@ class LiveAdvisor(tk.Tk):
             self.sizing_var.set("")
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
+            self.decision_strip_var.set("")
             self._apply_threat_colors(None)
 
 

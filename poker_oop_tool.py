@@ -506,6 +506,29 @@ def straight_draws(hole, board):
         elif span <= 4 and u >= 3: gutshot = True
     return oesd, gutshot
 
+
+def _draw_suffix(hero_class, fd, nfd, bfd, oesd, gutshot):
+    """Връща ' + NFD/FD/BFD' / ' + OESD/GS' suffix за hand label.
+
+    Само за класове, при които draw добавя реална equity на върха на
+    made hand-а (high_card / pair / two_pair / trips / set). За
+    straight/flush/full_house+ — самият "draw" вече е made или
+    несъществен.
+    """
+    if hero_class in ('straight', 'flush', 'full_house', 'quads',
+                      'straight_flush'):
+        return ""
+    parts = []
+    if fd:
+        parts.append("NFD" if nfd else "FD")
+    elif bfd:
+        parts.append("BFD")
+    if oesd:
+        parts.append("OESD")
+    elif gutshot:
+        parts.append("GS")
+    return f" + {'/'.join(parts)}" if parts else ""
+
 def made_straight(hole, board):
     """Проверява за made straight (5 последователни, поне 1 hole card)."""
     all_vals = sorted(set(RV[c[0]] for c in hole + board))
@@ -1355,8 +1378,20 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     street_name = {3: 'flop', 4: 'turn', 5: 'river'}.get(len(board), 'flop')
     is_river = streets_left == 0
 
+    # Draw detection — no draws on river
+    if is_river:
+        fd = nfd = bfd = oesd = gutshot = False
+    else:
+        fd = flush_draw(hole, board)
+        nfd = nut_flush_draw(hole, board)
+        bfd = backdoor_fd(hole, board)
+        oesd, gutshot = straight_draws(hole, board)
+
     # Hero hand classification + threats (за "ТИ ИМАШ / ТЕ БИЕ" поленце)
     hero_class, hero_label = classify_hero_hand(hole, board)
+    # Append draw to label so user sees pair+OESD не като чисто mid pair.
+    hero_label = hero_label + _draw_suffix(hero_class, fd, nfd, bfd,
+                                           oesd, gutshot)
     hero_threats = hand_threats(hole, board, hero_class)
 
     # Approximate range breakdown vs villain opening range (single-position proxy).
@@ -1379,15 +1414,6 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     mw_note = ""
     if is_multiway:
         mw_note = f"Multiway ({num_opponents} опонента): TP = 1 улица, draws downgrade, без bluff c-bet."
-
-    # Draw detection — no draws on river
-    if is_river:
-        fd = nfd = bfd = oesd = gutshot = False
-    else:
-        fd = flush_draw(hole, board)
-        nfd = nut_flush_draw(hole, board)
-        bfd = backdoor_fd(hole, board)
-        oesd, gutshot = straight_draws(hole, board)
 
     # Made hand detection (works on all streets)
     has_made_flush = made_flush(hole, board)
