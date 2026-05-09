@@ -805,6 +805,145 @@ def hand_threats(hole, board, hero_class):
     return threats
 
 
+# ─── Range breakdown (за "ТИ ИМАШ" / "ТЕ БИЕ" % индикатор) ─────────────────
+HAND_HIERARCHY = ['high_card', 'pair', 'two_pair', 'trips', 'set',
+                  'straight', 'flush', 'full_house', 'quads',
+                  'straight_flush']
+
+
+def _strength_tuple(hole, board, class_id):
+    """Comparable tuple за hand strength: (class_idx, primary_rank, secondary_rank).
+
+    Не е пълно 5-картово evaluation — за flush/straight ползваме hole high
+    като tiebreak, което не е винаги точно (5-card flush kicker, straight
+    high от board). Приема се за ориентировъчно изчисление.
+    """
+    from collections import Counter
+    ci = HAND_HIERARCHY.index(class_id) if class_id in HAND_HIERARCHY else 0
+    h1, h2 = hole
+    hole_ranks = [h1[0], h2[0]]
+    hole_vals = sorted([RV[h1[0]], RV[h2[0]]], reverse=True)
+    board_ranks = [c[0] for c in board] if board else []
+    bcnt = Counter(board_ranks)
+
+    if class_id == 'high_card':
+        return (ci, hole_vals[0], hole_vals[1])
+
+    if class_id == 'pair':
+        # Pocket pair (overpair / underpair) — hole_ranks[0] == hole_ranks[1]
+        if hole_ranks[0] == hole_ranks[1]:
+            return (ci, RV[hole_ranks[0]], -1)
+        paired = [r for r in hole_ranks if r in board_ranks]
+        if paired:
+            kicker = next((r for r in hole_ranks if r != paired[0]), paired[0])
+            return (ci, RV[paired[0]], RV[kicker])
+        return (ci, hole_vals[0], hole_vals[1])
+
+    if class_id == 'two_pair':
+        # Може да е (а) hole pair + board pair или (б) и двете hole pair-нати с board
+        paired_with_board = sorted(
+            (RV[r] for r in hole_ranks if r in board_ranks), reverse=True
+        )
+        if len(paired_with_board) >= 2:
+            return (ci, paired_with_board[0], paired_with_board[1])
+        if hole_ranks[0] == hole_ranks[1]:
+            board_pair = max((RV[r] for r, n in bcnt.items() if n >= 2), default=0)
+            return (ci, max(RV[hole_ranks[0]], board_pair),
+                    min(RV[hole_ranks[0]], board_pair))
+        return (ci, hole_vals[0], 0)
+
+    if class_id == 'trips':
+        for hr in hole_ranks:
+            if bcnt.get(hr, 0) >= 2:
+                kicker = next((r for r in hole_ranks if r != hr), hr)
+                return (ci, RV[hr], RV[kicker])
+        return (ci, 0, 0)
+
+    if class_id == 'set':
+        if hole_ranks[0] == hole_ranks[1]:
+            return (ci, RV[hole_ranks[0]], 0)
+        return (ci, 0, 0)
+
+    if class_id == 'full_house':
+        all_cnt = Counter(hole_ranks + board_ranks)
+        trips = sorted((RV[r] for r, n in all_cnt.items() if n >= 3), reverse=True)
+        trip_rv = trips[0] if trips else 0
+        pair_rv = max(
+            (RV[r] for r, n in all_cnt.items() if n >= 2 and RV[r] != trip_rv),
+            default=0,
+        )
+        return (ci, trip_rv, pair_rv)
+
+    if class_id == 'quads':
+        all_cnt = Counter(hole_ranks + board_ranks)
+        q_rv = max((RV[r] for r, n in all_cnt.items() if n >= 4), default=0)
+        return (ci, q_rv, 0)
+
+    # flush / straight / straight_flush — high hole card като tiebreak
+    return (ci, hole_vals[0], hole_vals[1])
+
+
+def _expand_combos(hand_str):
+    """`'77'` → 6 combos, `'AKs'` → 4 combos, `'AKo'` → 12 combos."""
+    combos = []
+    if len(hand_str) == 2:
+        r = hand_str[0]
+        for i in range(len(SUITS)):
+            for j in range(i + 1, len(SUITS)):
+                combos.append(((r, SUITS[i]), (r, SUITS[j])))
+    elif len(hand_str) == 3:
+        r1, r2, t = hand_str[0], hand_str[1], hand_str[2]
+        if t == 's':
+            for s in SUITS:
+                combos.append(((r1, s), (r2, s)))
+        elif t == 'o':
+            for s1 in SUITS:
+                for s2 in SUITS:
+                    if s1 != s2:
+                        combos.append(((r1, s1), (r2, s2)))
+    return combos
+
+
+def range_breakdown(hole, board, villain_hands, hero_class):
+    """За даден villain range (set от hand strings като {'AKs','77',...})
+    връща dict(beat_pct, lose_pct, tie_pct, n_combos) или None ако няма
+    валидни combos.
+
+    Ориентировъчно: класифицира всеки villain combo с classify_hero_hand
+    и сравнява по HAND_HIERARCHY index + rank tiebreaker. Игнорира draw
+    equity и точни 5-картови flush kickers.
+    """
+    if not board or len(board) < 3 or not villain_hands:
+        return None
+
+    used = set(hole) | set(board)
+    hero_t = _strength_tuple(hole, board, hero_class)
+
+    n_beat = n_lose = n_tie = 0
+    for hs in villain_hands:
+        for c1, c2 in _expand_combos(hs):
+            if c1 in used or c2 in used:
+                continue
+            v_class, _ = classify_hero_hand([c1, c2], board)
+            v_t = _strength_tuple([c1, c2], board, v_class)
+            if hero_t > v_t:
+                n_beat += 1
+            elif hero_t < v_t:
+                n_lose += 1
+            else:
+                n_tie += 1
+
+    total = n_beat + n_lose + n_tie
+    if total == 0:
+        return None
+    return dict(
+        beat_pct=round(100 * n_beat / total),
+        lose_pct=round(100 * n_lose / total),
+        tie_pct=round(100 * n_tie / total),
+        n_combos=total,
+    )
+
+
 # ─── Математика: equity и pot odds ───────────────────────────────────────────
 def equity_from_outs(outs, streets_left=2):
     """Приблизителна equity от outs. Rule of 2 & 4.
@@ -1220,6 +1359,14 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     hero_class, hero_label = classify_hero_hand(hole, board)
     hero_threats = hand_threats(hole, board, hero_class)
 
+    # Approximate range breakdown vs villain opening range (single-position proxy).
+    # Villain street-by-street ranges не се moделират — взимаме opening range
+    # на тяхната позиция, или CO като coarse default. Само made-hand сравнение.
+    villain_range = OPEN_RANGES.get(villain_pos) or OPEN_RANGES.get('CO', set())
+    range_info = range_breakdown(hole, board, villain_range, hero_class)
+    beat_pct = range_info['beat_pct'] if range_info else None
+    lose_pct = range_info['lose_pct'] if range_info else None
+
     # SPR изчисление + bucketing (ако имаме stack/pot info)
     spr_val = None
     if stack_bb is not None and pot_bb is not None and pot_bb > 0:
@@ -1324,6 +1471,8 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             hero_class=hero_class,
             hero_label=hero_label,
             threats=hero_threats,
+            beat_pct=beat_pct,
+            lose_pct=lose_pct,
         )
 
     # Draw outs (0 on river) — виж OUTS_* константи най-горе

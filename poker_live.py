@@ -781,21 +781,41 @@ class LiveAdvisor(tk.Tk):
         self.threats_frame = tk.Frame(res, bg="#1a1a22", bd=1, relief="solid")
         self.threats_frame.pack(fill="x", padx=20, pady=4)
         self.threats_have_var = tk.StringVar(value="")
-        tk.Label(self.threats_frame, textvariable=self.threats_have_var,
-                 bg="#1a1a22", fg="#88ddff",
-                 font=("Segoe UI", 10, "bold"), anchor="w", padx=8, pady=2,
-                 wraplength=600, justify="left").pack(fill="x")
+        self.threats_have_lbl = tk.Label(
+            self.threats_frame, textvariable=self.threats_have_var,
+            bg="#1a1a22", fg="#88ddff",
+            font=("Segoe UI", 10, "bold"), anchor="w", padx=8, pady=2,
+            wraplength=600, justify="left")
+        self.threats_have_lbl.pack(fill="x")
         self.threats_beat_var = tk.StringVar(value="")
-        tk.Label(self.threats_frame, textvariable=self.threats_beat_var,
-                 bg="#1a1a22", fg="#ff9988",
-                 font=("Segoe UI", 10), anchor="w", padx=8, pady=2,
-                 wraplength=600, justify="left").pack(fill="x")
+        self.threats_beat_lbl = tk.Label(
+            self.threats_frame, textvariable=self.threats_beat_var,
+            bg="#1a1a22", fg="#ff9988",
+            font=("Segoe UI", 10), anchor="w", padx=8, pady=2,
+            wraplength=600, justify="left")
+        self.threats_beat_lbl.pack(fill="x")
         self.post_reason_var = tk.StringVar(value="")
         tk.Label(res, textvariable=self.post_reason_var, bg=self.BG2, fg="#ccc",
                  font=("Segoe UI", 11), wraplength=600, pady=2, justify="center").pack()
         self.sizing_var = tk.StringVar(value="")
         tk.Label(res, textvariable=self.sizing_var, bg=self.BG2, fg="#ffcc66",
                  font=("Segoe UI", 11, "bold"), pady=2).pack()
+
+    # ── ТИ ИМАШ / ТЕ БИЕ цветова палитра ─────────────────────────────────────
+    # Прилага се на frame + двата label-а според beat_pct.
+    # None = неутрално (clear / preflop). Прагове 65 / 35 — emperично.
+    def _apply_threat_colors(self, beat_pct):
+        if beat_pct is None:
+            frame_bg, have_fg, beat_fg = "#1a1a22", "#88ddff", "#ff9988"
+        elif beat_pct >= 65:
+            frame_bg, have_fg, beat_fg = "#1a2a1a", "#88ff88", "#aaccaa"
+        elif beat_pct >= 35:
+            frame_bg, have_fg, beat_fg = "#2a261a", "#ffd866", "#ffaa66"
+        else:
+            frame_bg, have_fg, beat_fg = "#2a1a1a", "#ffaaaa", "#ff7766"
+        self.threats_frame.config(bg=frame_bg)
+        self.threats_have_lbl.config(bg=frame_bg, fg=have_fg)
+        self.threats_beat_lbl.config(bg=frame_bg, fg=beat_fg)
 
     # ── Card Picker ───────────────────────────────────────────────────────────
     def _pick_rank(self, rank):
@@ -1900,14 +1920,19 @@ class LiveAdvisor(tk.Tk):
                 # ── ТИ ИМАШ / ТЕ БИЕ поленце ──
                 hero_label = r.get("hero_label", "")
                 threats = r.get("threats", [])
+                beat_pct = r.get("beat_pct")
+                lose_pct = r.get("lose_pct")
+                pct_have = f" ({beat_pct}% от range)" if beat_pct is not None else ""
+                pct_beat = f" ({lose_pct}% от range)" if lose_pct is not None else ""
                 if hero_label:
-                    self.threats_have_var.set(f"ТИ ИМАШ: {hero_label}")
+                    self.threats_have_var.set(f"ТИ ИМАШ: {hero_label}{pct_have}")
                 else:
                     self.threats_have_var.set("")
                 if threats:
-                    self.threats_beat_var.set("ТЕ БИЕ: " + ", ".join(threats))
+                    self.threats_beat_var.set(f"ТЕ БИЕ{pct_beat}: " + ", ".join(threats))
                 else:
-                    self.threats_beat_var.set("ТЕ БИЕ: nothing на този борд")
+                    self.threats_beat_var.set(f"ТЕ БИЕ{pct_beat}: nothing на този борд")
+                self._apply_threat_colors(beat_pct)
                 # Strategy log: postflop advice
                 if self.strategy_logger and w.hand_id:
                     try:
@@ -1925,6 +1950,7 @@ class LiveAdvisor(tk.Tk):
                 self.sizing_var.set("")
                 self.threats_have_var.set("")
                 self.threats_beat_var.set("")
+                self._apply_threat_colors(None)
         elif len(hole) == 2:
             self.post_action_var.set("Preflop")
             self.post_hand_var.set("")
@@ -1933,6 +1959,7 @@ class LiveAdvisor(tk.Tk):
             self.sizing_var.set("")
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
+            self._apply_threat_colors(None)
         else:
             self.post_action_var.set("")
             self.post_hand_var.set("")
@@ -1941,6 +1968,7 @@ class LiveAdvisor(tk.Tk):
             self.sizing_var.set("")
             self.threats_have_var.set("")
             self.threats_beat_var.set("")
+            self._apply_threat_colors(None)
 
 
 if __name__ == "__main__":
