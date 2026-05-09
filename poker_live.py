@@ -658,6 +658,7 @@ class LiveAdvisor(tk.Tk):
         self._hole_source = None
         self._hole_confidence = None
         self._compact_mode = False
+        self._icm_pressure = 0.0  # 0=off, 0.5=mild, 0.7=heavy
         if _LOG:
             _LOG.info("[INIT] LiveAdvisor started; scanner=%s",
                       "OK" if self.scanner and self.scanner.available
@@ -680,6 +681,15 @@ class LiveAdvisor(tk.Tk):
             command=self._toggle_compact,
         )
         self.compact_btn.pack(side="right", padx=(4, 12))
+        # ICM toggle — за турнирен late-stage play (близо до payouts/bubble).
+        # 3 нива: OFF / ICM / ICM! (heavy). Цикли при click.
+        self.icm_btn = tk.Button(
+            hdr, text="ICM: off", font=("Segoe UI", 9, "bold"),
+            bg="#332828", fg="#cccccc", activebackground="#4a3a3a",
+            relief="flat", bd=0, padx=10, pady=3,
+            command=self._cycle_icm,
+        )
+        self.icm_btn.pack(side="right", padx=(4, 4))
         self.status_var = tk.StringVar(value="Waiting for hand...")
         tk.Label(hdr, textvariable=self.status_var, bg=self.BG2, fg="#88aa88",
                  font=("Segoe UI", 11)).pack(side="right", padx=8)
@@ -976,6 +986,18 @@ class LiveAdvisor(tk.Tk):
                     fill="x", padx=20, pady=4, before=self.post_reason_lbl)
             self.compact_btn.config(text="COMPACT")
             self.minsize(500, 400)
+
+    def _cycle_icm(self):
+        """Cycle ICM pressure: off → mild (0.5) → heavy (0.7) → off."""
+        if self._icm_pressure == 0.0:
+            self._icm_pressure = 0.5
+            self.icm_btn.config(text="ICM: mild", bg="#4a3a28", fg="#ffd866")
+        elif self._icm_pressure == 0.5:
+            self._icm_pressure = 0.7
+            self.icm_btn.config(text="ICM: heavy", bg="#4a2828", fg="#ff8866")
+        else:
+            self._icm_pressure = 0.0
+            self.icm_btn.config(text="ICM: off", bg="#332828", fg="#cccccc")
 
     def _set_focus_panel(self, meta, action, detail, color="#f0d060"):
         self.focus_meta_var.set(meta or "")
@@ -2236,7 +2258,8 @@ class LiveAdvisor(tk.Tk):
                            if w.bb_size > 0 and w.hero_stack_chips > 0
                            else None)
             pf = preflop_analyze(hole, hero_pos=pos, facing_raise=facing_raise,
-                                 stack_bb=stack_bb_pf)
+                                 stack_bb=stack_bb_pf,
+                                 icm_pressure=self._icm_pressure)
             num_opp_est = max(
                 1, (len(w.occupied_seats) - len(w.folded_seats)) - 1,
             )
@@ -2337,7 +2360,8 @@ class LiveAdvisor(tk.Tk):
                 r = postflop_analyze(hole, board, facing_bet=facing, hero_pos=pos, villain_pos=vp,
                                      stack_bb=stack_bb, pot_bb=pot_bb, num_opponents=num_opp,
                                      call_bb=(call_bb if facing else None),
-                                     is_3bet_pot=bool(getattr(w, 'facing_raise_preflop', False)))
+                                     is_3bet_pot=bool(getattr(w, 'facing_raise_preflop', False)),
+                                     icm_pressure=self._icm_pressure)
                 post_warnings = self._context_warnings(
                     position_source=getattr(w, "position_source", None),
                     hero_pos=pos,

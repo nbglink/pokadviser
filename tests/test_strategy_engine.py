@@ -318,6 +318,59 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIn("primary_freq", r)
         self.assertIn("range_advantage", r)
 
+    # ── Tier 3: ICM lite ──
+
+    def test_icm_off_no_change(self):
+        # Without ICM: marginal ATo from CO vs UTG → CALL
+        r = strategy.preflop_analyze(
+            [("A", "c"), ("T", "d")], hero_pos="CO", facing_raise=True,
+            raiser_pos="UTG", stack_bb=40, icm_pressure=0.0,
+        )
+        self.assertNotIn("ICM", r.get("reason", ""))
+
+    def test_icm_pressure_folds_marginal(self):
+        # With ICM heavy: ATo CALL → FOLD
+        r = strategy.preflop_analyze(
+            [("A", "c"), ("T", "d")], hero_pos="CO", facing_raise=True,
+            raiser_pos="UTG", stack_bb=40, icm_pressure=0.7,
+        )
+        self.assertIn("FOLD", r["action"])
+        self.assertIn("ICM", r["reason"])
+
+    def test_icm_does_not_fold_premium(self):
+        # AA must still raise even under heavy ICM
+        r = strategy.preflop_analyze(
+            [("A", "c"), ("A", "d")], hero_pos="CO", facing_raise=True,
+            raiser_pos="UTG", stack_bb=40, icm_pressure=0.7,
+        )
+        self.assertTrue(
+            "RAISE" in r["action"] or "BET" in r["action"]
+            or "3-BET" in r["action"] or "4-BET" in r["action"],
+            r["action"],
+        )
+
+    def test_icm_postflop_annotation(self):
+        # ICM annotation appears in reason
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h"), ("5", "s"), ("8", "d")],
+            facing_bet=True, hero_pos="CO", villain_pos="BTN",
+            stack_bb=15, pot_bb=10, call_bb=5, num_opponents=1,
+            icm_pressure=0.7,
+        )
+        self.assertIn("ICM", r["reason"])
+        self.assertEqual(r["icm_pressure"], 0.7)
+
+    def test_icm_postflop_zero_no_annotation(self):
+        r = strategy.postflop_analyze(
+            [("A", "h"), ("K", "s")],
+            [("A", "d"), ("7", "c"), ("2", "h")],
+            facing_bet=False, hero_pos="CO",
+            icm_pressure=0.0,
+        )
+        self.assertNotIn("ICM", r["reason"])
+        self.assertEqual(r["icm_pressure"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
