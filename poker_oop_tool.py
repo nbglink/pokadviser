@@ -1221,6 +1221,107 @@ def range_breakdown(hole, board, villain_hands, hero_class):
     )
 
 
+# ─── Range vs range advantage ────────────────────────────────────────────────
+# Кеш за range_strength resultите — една и съща (range_set, board) дава
+# същия strength. Ключ: (frozenset(range), tuple(sorted(board cards))).
+_RANGE_STRENGTH_CACHE = {}
+
+
+def range_strength(range_hands, board):
+    """Average hand-class strength index за range върху даден board.
+
+    За всяко combo в range-а (с card removal спрямо board), класифицираме
+    made hand-а с classify_hero_hand и взимаме HAND_HIERARCHY index.
+    Връща avg index 0..9 (0=high_card, 9=straight_flush). По-висок =
+    по-силен range на тая текстура.
+
+    Cached по (frozenset(range_hands), board_tuple) — една и съща
+    комбинация се изчислява веднъж.
+    """
+    if not range_hands or not board or len(board) < 3:
+        return 0.0
+    # Cache key
+    board_key = tuple(sorted((c[0], c[1]) for c in board))
+    cache_key = (frozenset(range_hands), board_key)
+    if cache_key in _RANGE_STRENGTH_CACHE:
+        return _RANGE_STRENGTH_CACHE[cache_key]
+    used = set(board)
+    total_score = 0
+    n_combos = 0
+    for hs in range_hands:
+        for c1, c2 in _expand_combos(hs):
+            if c1 in used or c2 in used:
+                continue
+            v_class, _ = classify_hero_hand([c1, c2], board)
+            if v_class in HAND_HIERARCHY:
+                total_score += HAND_HIERARCHY.index(v_class)
+                n_combos += 1
+    if n_combos == 0:
+        result = 0.0
+    else:
+        result = total_score / n_combos
+    _RANGE_STRENGTH_CACHE[cache_key] = result
+    return result
+
+
+def range_vs_range_advantage(hero_pos, villain_pos, board):
+    """Returns advantage delta in [-1, +1].
+
+    +ve = hero range advantage on this board (по-силен среден made hand).
+    -ve = villain range advantage.
+
+    Computation: difference in range_strength normalized by max
+    hierarchy span (9 = high_card → straight_flush). Approximate but
+    informative.
+
+    Returns dict(hero_strength, villain_strength, delta, label).
+    """
+    if not board or len(board) < 3:
+        return None
+    hero_range = OPEN_RANGES.get(hero_pos)
+    villain_range = OPEN_RANGES.get(villain_pos) or OPEN_RANGES.get('CO')
+    if not hero_range or not villain_range:
+        return None
+    hero_s = range_strength(hero_range, board)
+    villain_s = range_strength(villain_range, board)
+    delta = (hero_s - villain_s) / 9.0  # normalize to ~[-1, +1]
+    if delta >= 0.025:
+        label = "hero range advantage"
+    elif delta <= -0.025:
+        label = "villain range advantage"
+    else:
+        label = "range равностойност"
+    return dict(
+        hero_strength=hero_s, villain_strength=villain_s,
+        delta=round(delta, 3), label=label,
+    )
+
+
+# ─── Mixed-frequency helper ──────────────────────────────────────────────────
+def mixed_frequency_from_ev(ev_a, ev_b, threshold_close=0.5,
+                            threshold_pure=1.5):
+    """От EV diff между две действия върнем (primary_freq, alt_freq).
+
+    Logic:
+      |ΔEV| >= threshold_pure → 100/0 (pure decision)
+      |ΔEV| <= threshold_close → 50/50 (true mix)
+      между → linear scale 50→100% по EV diff
+
+    Returns (primary_freq, alt_freq) tuple, primary corresponds to
+    higher-EV option. Both в percent (0..100).
+    """
+    diff = abs(ev_a - ev_b)
+    if diff >= threshold_pure:
+        return 100, 0
+    if diff <= threshold_close:
+        return 50, 50
+    # Linear interpolation
+    frac = (diff - threshold_close) / (threshold_pure - threshold_close)
+    primary = 50 + int(round(frac * 50))
+    alt = 100 - primary
+    return primary, alt
+
+
 # ─── Математика: equity и pot odds ───────────────────────────────────────────
 def equity_from_outs(outs, streets_left=2):
     """Приблизителна equity от outs. Rule of 2 & 4.
@@ -1813,6 +1914,15 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         threebet_note = "3-bet pot: tighter ranges, малък sizing, бърз commit"
     # Blocker awareness: hero блокира ли nut combos?
     blocker_note = _blocker_note(hole, board, hero_class)
+    # Range vs range advantage — informational, append to reason.
+    rva_info = range_vs_range_advantage(hero_pos, villain_pos, board)
+    rva_note = ""
+    if rva_info:
+        delta = rva_info['delta']
+        if abs(delta) >= 0.025:
+            sign = "+" if delta > 0 else ""
+            rva_note = (f"range advantage: {sign}{delta:.2f} → "
+                        f"{rva_info['label']}")
 
     pn = f"  [{pa['note']}]" if pa.get('note') else ""
     sn = f"  [{spr_note}]" if spr_note else ""
@@ -1820,6 +1930,7 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     ftn = f"  [{ft_note}]" if ft_note else ""
     tbn = f"  [{threebet_note}]" if threebet_note else ""
     bln = f"  [{blocker_note}]" if blocker_note else ""
+    rvn = f"  [{rva_note}]" if rva_note else ""
 
     def _mw_adjust(action, color, hand_label):
         """При multiway смъкваме агресията за non-nut hands.
@@ -1875,12 +1986,12 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             return f"CHECK ({threat_str} заплаха)", "#ffb040"
         return action, color
 
-    def R(a, c, h, r):
+    def R(a, c, h, r, alt_action=None, alt_freq=None, primary_freq=None):
         a2, c2 = _mw_adjust(a, c, h)
         a3, c3 = _threat_adjust(a2, c2, h)
         return dict(
             action=a3, color=c3, hand=h,
-            reason=r + pn + sn + mn + ftn + tbn + bln,
+            reason=r + pn + sn + mn + ftn + tbn + bln + rvn,
             sizing=sizing,
             hero_class=hero_class,
             hero_label=hero_label,
@@ -1888,6 +1999,10 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             beat_pct=beat_pct,
             lose_pct=lose_pct,
             is_3bet_pot=is_3bet_pot,
+            alt_action=alt_action,
+            alt_freq=alt_freq,
+            primary_freq=primary_freq,
+            range_advantage=rva_info,
         )
 
     # Draw outs (0 on river) — виж OUTS_* константи най-горе
@@ -1979,23 +2094,45 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
                     f"< need {bet_pct_pot/(1+bet_pct_pot)*100:.0f}%. "
                     f"EV(call)≈{ev_call:.1f}BB. MDF={mdf_pct*100:.0f}%.",
                 )
-            # Not facing bet — choose BET vs CHECK by EV
+            # Not facing bet — choose BET vs CHECK by EV (with mix when close)
             typical_bet_bb = pot_bb * sizing_pct
             fe_est = _river_fold_equity_estimate(bi, hero_class, beat_pct)
             ev_bet = ev_river_bet(pot_bb, typical_bet_bb, fe_est, eff_eq)
             ev_check = eff_eq * pot_bb  # rough — villain may bet later
-            if ev_bet > ev_check + 0.5:
-                sz = int(round(typical_bet_bb / pot_bb * 100))
+            primary_f, alt_f = mixed_frequency_from_ev(ev_bet, ev_check)
+            sz = int(round(typical_bet_bb / pot_bb * 100))
+            bet_action = f"BET {sz}% ({street_label.lower()} +EV)"
+            check_action = "CHECK (showdown)" if is_river else "CHECK"
+            if ev_bet > ev_check:
+                # Bet is primary
+                if alt_f > 0:
+                    return R(
+                        bet_action, "#60ff60", hero_label,
+                        f"{street_label} bet EV +{ev_bet:.1f}BB vs check "
+                        f"+{ev_check:.1f}BB. FE~{fe_est*100:.0f}%, "
+                        f"eff_eq~{eff_eq*100:.0f}%. MIX: bet {primary_f}%, "
+                        f"check {alt_f}%.",
+                        alt_action=check_action, alt_freq=alt_f,
+                        primary_freq=primary_f,
+                    )
                 return R(
-                    f"BET {sz}% ({street_label.lower()} +EV)", "#60ff60",
-                    hero_label,
+                    bet_action, "#60ff60", hero_label,
                     f"{street_label} bet +EV ≈ +{ev_bet:.1f}BB > "
                     f"check +{ev_check:.1f}BB. FE~{fe_est*100:.0f}%, "
                     f"eff_eq~{eff_eq*100:.0f}%.",
                 )
+            # Check is primary
+            if alt_f > 0:
+                return R(
+                    check_action, "#f0d060", hero_label,
+                    f"{street_label} check EV +{ev_check:.1f}BB vs bet "
+                    f"+{ev_bet:.1f}BB. MIX: check {primary_f}%, "
+                    f"bet {alt_f}%.",
+                    alt_action=bet_action, alt_freq=alt_f,
+                    primary_freq=primary_f,
+                )
             return R(
-                "CHECK (showdown)" if is_river else "CHECK",
-                "#f0d060", hero_label,
+                check_action, "#f0d060", hero_label,
                 f"{street_label} check: bet EV ≈ {ev_bet:.1f}BB ≤ check "
                 f"EV {ev_check:.1f}BB.",
             )
