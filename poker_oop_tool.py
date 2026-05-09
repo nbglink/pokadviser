@@ -398,7 +398,7 @@ CALL_VS_3BET_OOP = {'TT','99','AQs','AJs','KQs','JJ'}
 # ─── Preflop анализ ───────────────────────────────────────────────────────────
 def preflop_analyze(hole, hero_pos=None, facing_raise=False, raiser_pos=None,
                     facing_3bet=False, three_bettor_pos=None,
-                    stack_bb=None):
+                    stack_bb=None, icm_pressure=0.0):
     hn = hand_name(hole[0], hole[1])
     is_suited = hn.endswith('s')
     is_pair = len(hn) == 2
@@ -431,19 +431,41 @@ def preflop_analyze(hole, hero_pos=None, facing_raise=False, raiser_pos=None,
                         reason="Слаба ръка — fold от повечето позиции.")
 
     if facing_3bet:
-        return _vs_3bet(hn, hero_pos, three_bettor_pos)
-    if facing_raise:
-        return _vs_raise(hn, hero_pos, raiser_pos)
-    # Short-stack RFI — trim marginal hands от standard range
-    if depth_bucket == 'short' and hero_pos in SHORT_STACK_TRIM:
-        trimmed = OPEN_RANGES.get(hero_pos, set()) - SHORT_STACK_TRIM[hero_pos]
-        if hn not in trimmed and hn in OPEN_RANGES.get(hero_pos, set()):
-            return dict(
-                action="FOLD", color="#ff6060", hand=hn,
-                reason=(f"{hn} е marginal за short stack ({stack_bb:.0f}BB). "
-                        f"При под 25 BB — само high-equity hands от {hero_pos}."),
+        result = _vs_3bet(hn, hero_pos, three_bettor_pos)
+    elif facing_raise:
+        result = _vs_raise(hn, hero_pos, raiser_pos)
+    else:
+        # Short-stack RFI — trim marginal hands от standard range
+        if depth_bucket == 'short' and hero_pos in SHORT_STACK_TRIM:
+            trimmed = OPEN_RANGES.get(hero_pos, set()) - SHORT_STACK_TRIM[hero_pos]
+            if hn not in trimmed and hn in OPEN_RANGES.get(hero_pos, set()):
+                result = dict(
+                    action="FOLD", color="#ff6060", hand=hn,
+                    reason=(f"{hn} е marginal за short stack ({stack_bb:.0f}BB). "
+                            f"При под 25 BB — само high-equity hands от {hero_pos}."),
+                )
+            else:
+                result = _rfi(hn, hero_pos)
+        else:
+            result = _rfi(hn, hero_pos)
+    # ICM pressure: тигни play близо до payouts/bubble. При marginal
+    # decisions, downgrade to FOLD; стандартните premium-и остават.
+    if icm_pressure >= 0.3 and result.get("action"):
+        a = result["action"].upper()
+        # CALL/RAISE/мix → ако е tier 3+ ръка → fold
+        if hn not in THREEBET_ALWAYS and hn not in THREEBET_VALUE:
+            if 'CALL' in a or 'ЗАВИСИ' in a or 'RAISE / CALL' in a:
+                result = dict(
+                    action="FOLD (ICM)", color="#ff6060", hand=hn,
+                    reason=(f"{hn} marginal — под ICM pressure играй tight. "
+                            f"{result.get('reason', '')}"),
+                )
+        # Note injection
+        if 'ICM' not in result.get('reason', ''):
+            result['reason'] = result.get('reason', '') + (
+                f"  [ICM pressure {int(icm_pressure*100)}%: tighter play]"
             )
-    return _rfi(hn, hero_pos)
+    return result
 
 
 def _shallow_decision(hn, hero_pos, facing_raise, raiser_pos, stack_bb):
@@ -1703,7 +1725,7 @@ def spr_bucket(spr):
 # ─── Postflop анализ (v4 — с SPR) ─────────────────────────────────────────────
 def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=None,
                      stack_bb=None, pot_bb=None, num_opponents=1,
-                     call_bb=None, is_3bet_pot=False):
+                     call_bb=None, is_3bet_pot=False, icm_pressure=0.0):
     """Postflop decision engine.
 
     Args:
@@ -1931,6 +1953,8 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
     tbn = f"  [{threebet_note}]" if threebet_note else ""
     bln = f"  [{blocker_note}]" if blocker_note else ""
     rvn = f"  [{rva_note}]" if rva_note else ""
+    icmn = (f"  [ICM pressure {int(icm_pressure*100)}%: tighter, "
+            f"avoid stacking off marginal]" if icm_pressure >= 0.3 else "")
 
     def _mw_adjust(action, color, hand_label):
         """При multiway смъкваме агресията за non-nut hands.
@@ -1991,7 +2015,7 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
         a3, c3 = _threat_adjust(a2, c2, h)
         return dict(
             action=a3, color=c3, hand=h,
-            reason=r + pn + sn + mn + ftn + tbn + bln + rvn,
+            reason=r + pn + sn + mn + ftn + tbn + bln + rvn + icmn,
             sizing=sizing,
             hero_class=hero_class,
             hero_label=hero_label,
@@ -2003,6 +2027,7 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
             alt_freq=alt_freq,
             primary_freq=primary_freq,
             range_advantage=rva_info,
+            icm_pressure=icm_pressure,
         )
 
     # Draw outs (0 on river) — виж OUTS_* константи най-горе
@@ -2074,6 +2099,10 @@ def postflop_analyze(hole, board, facing_bet=False, hero_pos=None, villain_pos=N
                 actual_bet_bb = call_bb if (call_bb and call_bb > 0) else (
                     pot_bb * sizing_pct)
                 ev_call = ev_river_call(pot_bb, actual_bet_bb, eff_eq)
+                # ICM tax: chips you lose are worth more than chips you gain
+                # in tournaments. Reduce EV(call) proportionally to icm_pressure.
+                if icm_pressure > 0:
+                    ev_call -= icm_pressure * actual_bet_bb * 0.3
                 bet_pct_pot = actual_bet_bb / pot_bb if pot_bb else 1.0
                 mdf_pct = mdf(bet_pct_pot)
                 draw_str = ""
